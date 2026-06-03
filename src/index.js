@@ -6,17 +6,33 @@ const cors = require('cors');
 const app = express();
 
 // ─── Middleware ───
-// FRONTEND_URL may be a comma-separated list of allowed origins.
-const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
+// Allowed origins: an explicit list from FRONTEND_URL (comma-separated), plus any
+// *.vercel.app host (Vercel gives each production AND preview deploy its own unique
+// hostname) and local dev. CORS isn't the auth boundary here — the API is guarded by
+// JWT bearer tokens (not cookies), so a token can't be read cross-origin — which makes
+// allowing Vercel hosts safe and saves us from chasing changing preview URLs.
+const explicitOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
 
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // non-browser clients / same-origin requests
+  if (explicitOrigins.includes(origin)) return true;
+  try {
+    const { hostname } = new URL(origin);
+    if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+    if (hostname.endsWith('.vercel.app')) return true; // production + preview deploys
+  } catch {
+    // malformed Origin header — fall through to deny
+  }
+  return false;
+}
+
 app.use(cors({
   origin(origin, cb) {
-    // Allow non-browser clients (no Origin header) and any whitelisted origin.
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(new Error(`Origin ${origin} not allowed by CORS`));
+    // Deny by returning false (NOT by throwing — a throw would surface as a 500).
+    cb(null, isAllowedOrigin(origin));
   },
   credentials: true
 }));
