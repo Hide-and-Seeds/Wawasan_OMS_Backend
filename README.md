@@ -161,7 +161,8 @@ Payload:
    `SUPABASE_SERVICE_ROLE_KEY` (server-side only, never ship to the browser).
 
 ### 2. Vercel
-1. Import the `oms-backend` folder as a Vercel project (Root Directory = `oms-backend`).
+1. Import the **wawasan-oms-backend** GitHub repo as a Vercel project
+   (Root Directory: leave as the repo root — the repo already *is* the backend).
 2. Add Environment Variables (see `.env.example`): `DATABASE_URL`, `SUPABASE_URL`,
    `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`, `JWT_SECRET`,
    `JWT_EXPIRES_IN`, `FRONTEND_URL` (your deployed frontend origin), and optionally
