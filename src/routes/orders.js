@@ -35,6 +35,17 @@ function notify(q, { userId, type, title, message, orderId }) {
   );
 }
 
+// Self-migration: ensure the per-SKU "made" tracking columns exist (runs once
+// per process; ADD COLUMN IF NOT EXISTS is idempotent and cheap on a no-op).
+let _itemColsReady = false;
+async function ensureItemColumns() {
+  if (_itemColsReady) return;
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made boolean NOT NULL DEFAULT false');
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_at timestamptz');
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_by uuid REFERENCES users(id)');
+  _itemColsReady = true;
+}
+
 // GET /api/orders — list with filters
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { stage, priority, search, week, from, to, page = 1, limit = 50 } = req.query;
@@ -83,6 +94,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 // GET /api/orders/kanban — grouped by stage
 router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const { week } = req.query;
+  await ensureItemColumns();
 
   const weekFilter = week === 'current'
     ? "AND date_trunc('week', o.required_delivery_date) = date_trunc('week', now())"
@@ -92,7 +104,8 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
-      (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE order_id = o.id) AS total_units
+      (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE order_id = o.id) AS total_units,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND made) AS made_count
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     WHERE o.stage NOT IN ('delivered','cancelled')
@@ -306,6 +319,29 @@ router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (
   });
 
   res.json({ message: 'PIC assigned' });
+}));
+
+// PATCH /api/orders/:id/items/:itemId — mark a line item made / not made
+router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) => {
+  const allowed = ['super_admin', 'operations_controller', 'production_lead', 'production_staff', 'packing_staff'];
+  if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  await ensureItemColumns();
+
+  const item = (await query(
+    'SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [req.params.itemId, req.params.id]
+  )).rows[0];
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  const made = !!req.body.made;
+  await query(
+    'UPDATE order_items SET made = $1, made_at = $2, made_by = $3 WHERE id = $4',
+    [made, made ? new Date().toISOString() : null, made ? req.user.id : null, req.params.itemId]
+  );
+  await logActivity(query, {
+    orderId: req.params.id, userId: req.user.id, action: made ? 'item_made' : 'item_reopened',
+    details: `${item.sku} — ${item.name} ${made ? 'marked made' : 'reopened'}`, ipAddress: req.ip || null,
+  });
+  res.json({ id: req.params.itemId, made });
 }));
 
 // POST /api/orders/:id/attachments

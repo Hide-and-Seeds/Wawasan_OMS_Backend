@@ -78,6 +78,9 @@ create table if not exists order_items (
   name       text not null,
   quantity   numeric not null,
   unit       text not null default 'pcs',
+  made       boolean not null default false,
+  made_at    timestamptz,
+  made_by    uuid references users(id),
   created_at timestamptz not null default now()
 );
 
