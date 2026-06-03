@@ -1,4 +1,11 @@
-.env 
-node_modules/ 
-data/ 
-uploads/ 
+.env
+.env.local
+node_modules/
+data/
+uploads/
+.vercel
+
+# Local SQLite artifacts (legacy — no longer used after the Supabase migration)
+*.db
+*.db-shm
+*.db-wal

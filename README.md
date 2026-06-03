@@ -1,16 +1,19 @@
 # Wawasan Candle OMS — Backend API
 
-Node.js + Express + SQLite backend for the Order Management System.
+Node.js + Express backend for the Order Management System, backed by **Supabase Postgres** and deployable to **Vercel** (serverless functions).
 
-## Quick Start
+## Quick Start (local dev)
 
 ```bash
 npm install
-cp .env.example .env        # Edit with your settings
-node src/utils/migrate.js   # Create database schema
-node src/utils/seed.js      # Seed test users & sample orders
-npm run dev                 # Start with auto-reload
+cp .env.example .env        # Fill in DATABASE_URL + SUPABASE_* (see Deployment)
+npm run migrate             # Apply schema.sql to your Supabase Postgres
+npm run seed                # Seed test users & sample orders
+npm run dev                 # Start with auto-reload on http://localhost:3001
 ```
+
+> The database now lives in **Supabase Postgres**, not a local SQLite file — you
+> need a Supabase project (and its `DATABASE_URL`) before running `migrate`/`seed`.
 
 ## Default Login Credentials (after seed)
 
@@ -143,10 +146,37 @@ Payload:
 }
 ```
 
+## Deployment (Supabase + Vercel)
+
+### 1. Supabase
+1. Create a project at https://supabase.com.
+2. **Schema** — open the SQL Editor and run the contents of [`schema.sql`](./schema.sql)
+   (or run `npm run migrate` locally with `DATABASE_URL` set).
+3. **Connection string** — Project Settings → Database → Connection string →
+   **Transaction pooler** (port `6543`). Use it as `DATABASE_URL`; the pooler is
+   required for serverless so connections don't pile up.
+4. **Storage** — create a bucket named `oms-uploads` (Storage → New bucket).
+   Make it public if you want attachment/signature URLs to resolve directly.
+5. **Service role key** — Project Settings → API → `service_role` secret →
+   `SUPABASE_SERVICE_ROLE_KEY` (server-side only, never ship to the browser).
+
+### 2. Vercel
+1. Import the `oms-backend` folder as a Vercel project (Root Directory = `oms-backend`).
+2. Add Environment Variables (see `.env.example`): `DATABASE_URL`, `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`, `JWT_SECRET`,
+   `JWT_EXPIRES_IN`, `FRONTEND_URL` (your deployed frontend origin), and optionally
+   SMTP + `SQL_ACCOUNT_WEBHOOK_SECRET`.
+3. Deploy. `vercel.json` routes every request to the Express app in `api/index.js`.
+4. Seed once locally (with `DATABASE_URL` pointing at Supabase): `npm run seed`.
+
+> The legacy SQLite files under `data/` and the local `uploads/` folder are no
+> longer used and are excluded from deploys via `.vercelignore`.
+
 ## Tech Stack
 - **Runtime**: Node.js 18+
 - **Framework**: Express 4
-- **Database**: SQLite via better-sqlite3 (easy to migrate to PostgreSQL)
+- **Database**: Supabase Postgres (via `pg`, connection pooler)
 - **Auth**: JWT (jsonwebtoken) + bcrypt
-- **File uploads**: multer
+- **File uploads**: multer (in-memory) → Supabase Storage
+- **Hosting**: Vercel serverless functions (`api/index.js`)
 - **Session**: Stateless JWT, 8h expiry

@@ -2,99 +2,96 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { getDb } = require('../utils/db');
-const { authenticate, canMoveOrders } = require('../middleware/auth');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const { query, withTransaction } = require('../utils/db');
+const { authenticate, canMoveOrders } = require('../middleware/auth');
+const asyncHandler = require('../utils/asyncHandler');
+const { uploadBuffer } = require('../lib/supabaseClient');
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `${uuidv4()}${ext}`);
-  }
+// Files are buffered in memory then streamed to Supabase Storage
+// (the local filesystem is ephemeral on serverless hosts like Vercel).
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10485760 },
 });
-const upload = multer({ storage, limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10485760 } });
 
 const VALID_STAGES = ['order', 'production', 'packing', 'ready_for_delivery', 'delivered', 'cancelled', 'on_hold'];
 
-// Helper: log activity
-function logActivity(db, { orderId, userId, action, details, oldValue, newValue, ipAddress }) {
-  db.prepare(`
-    INSERT INTO activity_log (id, order_id, user_id, action, details, old_value, new_value, ip_address)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), orderId || null, userId, action, details || null, oldValue || null, newValue || null, ipAddress || null);
+// Helper: log activity. `q` is a query runner (global query, or a tx client).
+function logActivity(q, { orderId, userId, action, details, oldValue, newValue, ipAddress }) {
+  return q(
+    `INSERT INTO activity_log (id, order_id, user_id, action, details, old_value, new_value, ip_address)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [uuidv4(), orderId || null, userId, action, details || null, oldValue || null, newValue || null, ipAddress || null]
+  );
 }
 
 // Helper: create notification
-function notify(db, { userId, type, title, message, orderId }) {
-  db.prepare(`
-    INSERT INTO notifications (id, user_id, type, title, message, order_id)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), userId, type, title, message || null, orderId || null);
+function notify(q, { userId, type, title, message, orderId }) {
+  return q(
+    `INSERT INTO notifications (id, user_id, type, title, message, order_id)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [uuidv4(), userId, type, title, message || null, orderId || null]
+  );
 }
 
 // GET /api/orders — list with filters
-router.get('/', authenticate, (req, res) => {
-  const db = getDb();
+router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { stage, priority, search, week, from, to, page = 1, limit = 50 } = req.query;
   const offset = (parseInt(page) - 1) * parseInt(limit);
 
-  let where = ['1=1'];
-  let params = [];
+  const where = ['1=1'];
+  const params = [];
 
-  if (stage) { where.push('o.stage = ?'); params.push(stage); }
-  if (priority) { where.push('o.priority = ?'); params.push(priority); }
+  if (stage) { where.push(`o.stage = $${params.push(stage)}`); }
+  if (priority) { where.push(`o.priority = $${params.push(priority)}`); }
   if (search) {
-    where.push('(o.invoice_number LIKE ? OR o.customer_name LIKE ?)');
-    params.push(`%${search}%`, `%${search}%`);
+    const term = `%${search}%`;
+    where.push(`(o.invoice_number ILIKE $${params.push(term)} OR o.customer_name ILIKE $${params.push(term)})`);
   }
   if (week === 'current') {
-    where.push("strftime('%W-%Y', o.required_delivery_date) = strftime('%W-%Y', 'now')");
+    where.push("date_trunc('week', o.required_delivery_date) = date_trunc('week', now())");
   }
-  if (from) { where.push('o.required_delivery_date >= ?'); params.push(from); }
-  if (to) { where.push('o.required_delivery_date <= ?'); params.push(to); }
+  if (from) { where.push(`o.required_delivery_date >= $${params.push(from)}`); }
+  if (to) { where.push(`o.required_delivery_date <= $${params.push(to)}`); }
+
+  const whereSql = where.join(' AND ');
+  const total = (await query(`SELECT COUNT(*)::int AS c FROM orders o WHERE ${whereSql}`, params)).rows[0].c;
+
+  const limitIdx = params.push(parseInt(limit));
+  const offsetIdx = params.push(offset);
 
   const sql = `
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
       cb.name AS created_by_name,
-      (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS item_count
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     LEFT JOIN users cb ON o.created_by = cb.id
-    WHERE ${where.join(' AND ')}
+    WHERE ${whereSql}
     ORDER BY
       CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
       o.required_delivery_date ASC
-    LIMIT ? OFFSET ?
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
-  params.push(parseInt(limit), offset);
 
-  const orders = db.prepare(sql).all(...params);
-  const total = db.prepare(`SELECT COUNT(*) as c FROM orders o WHERE ${where.join(' AND ')}`).get(...params.slice(0, -2)).c;
-
+  const orders = (await query(sql, params)).rows;
   res.json({ orders, total, page: parseInt(page), limit: parseInt(limit) });
-});
+}));
 
 // GET /api/orders/kanban — grouped by stage
-router.get('/kanban', authenticate, (req, res) => {
-  const db = getDb();
+router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const { week } = req.query;
 
-  let weekFilter = '';
-  if (week === 'current') {
-    weekFilter = "AND strftime('%W-%Y', o.required_delivery_date) = strftime('%W-%Y', 'now')";
-  }
+  const weekFilter = week === 'current'
+    ? "AND date_trunc('week', o.required_delivery_date) = date_trunc('week', now())"
+    : '';
 
   const sql = `
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
-      (SELECT COUNT(*) FROM order_items WHERE order_id = o.id) AS item_count
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     WHERE o.stage NOT IN ('delivered','cancelled')
@@ -104,56 +101,54 @@ router.get('/kanban', authenticate, (req, res) => {
       o.required_delivery_date ASC
   `;
 
-  const allOrders = db.prepare(sql).all();
+  const allOrders = (await query(sql)).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
   for (const o of allOrders) {
     if (board[o.stage]) board[o.stage].push(o);
   }
 
   res.json(board);
-});
+}));
 
 // GET /api/orders/:id
-router.get('/:id', authenticate, (req, res) => {
-  const db = getDb();
-  const order = db.prepare(`
+router.get('/:id', authenticate, asyncHandler(async (req, res) => {
+  const order = (await query(`
     SELECT o.*, u.name AS pic_name, u.avatar_color AS pic_color, cb.name AS created_by_name
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     LEFT JOIN users cb ON o.created_by = cb.id
-    WHERE o.id = ?
-  `).get(req.params.id);
+    WHERE o.id = $1
+  `, [req.params.id])).rows[0];
 
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY rowid').all(order.id);
-  const attachments = db.prepare(`
+  const items = (await query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at', [order.id])).rows;
+  const attachments = (await query(`
     SELECT a.*, u.name AS uploaded_by_name FROM order_attachments a
     JOIN users u ON a.uploaded_by = u.id
-    WHERE a.order_id = ? ORDER BY a.uploaded_at DESC
-  `).all(order.id);
-  const activity = db.prepare(`
+    WHERE a.order_id = $1 ORDER BY a.uploaded_at DESC
+  `, [order.id])).rows;
+  const activity = (await query(`
     SELECT al.*, u.name AS user_name FROM activity_log al
     JOIN users u ON al.user_id = u.id
-    WHERE al.order_id = ? ORDER BY al.created_at DESC
-  `).all(order.id);
-  const transitions = db.prepare(`
+    WHERE al.order_id = $1 ORDER BY al.created_at DESC
+  `, [order.id])).rows;
+  const transitions = (await query(`
     SELECT st.*, u.name AS by_name FROM stage_transitions st
     JOIN users u ON st.transitioned_by = u.id
-    WHERE st.order_id = ? ORDER BY st.created_at ASC
-  `).all(order.id);
+    WHERE st.order_id = $1 ORDER BY st.created_at ASC
+  `, [order.id])).rows;
 
   res.json({ ...order, items, attachments, activity, transitions });
-});
+}));
 
 // POST /api/orders — create order
-router.post('/', authenticate, (req, res) => {
+router.post('/', authenticate, asyncHandler(async (req, res) => {
   const allowed = ['super_admin', 'operations_controller'];
   if (!allowed.includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
 
-  const db = getDb();
   const {
     invoice_number, customer_name, customer_contact,
     order_date, required_delivery_date, expiry_date,
@@ -165,48 +160,49 @@ router.post('/', authenticate, (req, res) => {
   }
 
   // Duplicate check
-  const existing = db.prepare('SELECT id FROM orders WHERE invoice_number = ?').get(invoice_number);
+  const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [invoice_number])).rows[0];
   if (existing) return res.status(409).json({ error: `Invoice ${invoice_number} already exists` });
 
   const orderId = uuidv4();
   const initialStage = skip_production ? 'packing' : 'order';
 
-  db.prepare(`
-    INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
-      order_date, required_delivery_date, expiry_date, stage, priority,
-      skip_production, pic_id, notes, source, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?)
-  `).run(orderId, invoice_number, customer_name, customer_contact || null,
-    order_date || new Date().toISOString().slice(0, 10),
-    required_delivery_date, expiry_date || null,
-    initialStage, priority, skip_production ? 1 : 0,
-    pic_id || null, notes || null, req.user.id);
+  await withTransaction(async (q) => {
+    await q(`
+      INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
+        order_date, required_delivery_date, expiry_date, stage, priority,
+        skip_production, pic_id, notes, source, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'manual', $13)
+    `, [orderId, invoice_number, customer_name, customer_contact || null,
+      order_date || new Date().toISOString().slice(0, 10),
+      required_delivery_date, expiry_date || null,
+      initialStage, priority, Boolean(skip_production),
+      pic_id || null, notes || null, req.user.id]);
 
-  for (const item of items) {
-    db.prepare('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(uuidv4(), orderId, item.sku, item.name, item.quantity, item.unit || 'pcs');
-  }
+    for (const item of items) {
+      await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
+        [uuidv4(), orderId, item.sku, item.name, item.quantity, item.unit || 'pcs']);
+    }
 
-  // Stage transition record
-  db.prepare('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES (?, ?, NULL, ?, ?)')
-    .run(uuidv4(), orderId, initialStage, req.user.id);
+    // Stage transition record
+    await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES ($1, $2, NULL, $3, $4)',
+      [uuidv4(), orderId, initialStage, req.user.id]);
 
-  logActivity(db, { orderId, userId: req.user.id, action: 'order_created',
-    details: `Order ${invoice_number} created`, newValue: initialStage, ipAddress: req.ip });
+    await logActivity(q, { orderId, userId: req.user.id, action: 'order_created',
+      details: `Order ${invoice_number} created`, newValue: initialStage, ipAddress: req.ip });
+  });
 
-  const created = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  const created = (await query('SELECT * FROM orders WHERE id = $1', [orderId])).rows[0];
   res.status(201).json(created);
-});
+}));
 
 // PATCH /api/orders/:id — edit order details
-router.patch('/:id', authenticate, (req, res) => {
+router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   const allowed = ['super_admin', 'operations_controller'];
   if (!allowed.includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
 
-  const db = getDb();
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const fields = ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'notes', 'pic_id'];
@@ -215,146 +211,152 @@ router.patch('/:id', authenticate, (req, res) => {
 
   for (const f of fields) {
     if (req.body[f] !== undefined) {
-      updates.push(`${f} = ?`);
-      values.push(req.body[f]);
+      updates.push(`${f} = $${values.push(req.body[f])}`);
     }
   }
 
   if (updates.length === 0) return res.status(400).json({ error: 'No valid fields to update' });
 
-  updates.push('updated_at = datetime("now")');
-  values.push(req.params.id);
+  updates.push('updated_at = now()');
+  const idIdx = values.push(req.params.id);
 
-  db.prepare(`UPDATE orders SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+  await query(`UPDATE orders SET ${updates.join(', ')} WHERE id = $${idIdx}`, values);
 
-  logActivity(db, { orderId: req.params.id, userId: req.user.id, action: 'order_edited',
-    details: `Fields updated: ${updates.slice(0, -1).join(', ')}`, ipAddress: req.ip });
+  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'order_edited',
+    details: `Fields updated: ${fields.filter(f => req.body[f] !== undefined).join(', ')}`, ipAddress: req.ip });
 
-  res.json(db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id));
-});
+  const updated = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
+  res.json(updated);
+}));
 
 // POST /api/orders/:id/move — move to next/specific stage
-router.post('/:id/move', authenticate, canMoveOrders, (req, res) => {
-  const db = getDb();
+router.post('/:id/move', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
   const { to_stage, reason } = req.body;
 
   if (!VALID_STAGES.includes(to_stage)) {
     return res.status(400).json({ error: 'Invalid target stage' });
   }
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const fromStage = order.stage;
 
-  db.prepare(`UPDATE orders SET stage = ?, updated_at = datetime("now") WHERE id = ?`)
-    .run(to_stage, order.id);
+  await withTransaction(async (q) => {
+    await q('UPDATE orders SET stage = $1, updated_at = now() WHERE id = $2', [to_stage, order.id]);
 
-  db.prepare('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by, reason) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(uuidv4(), order.id, fromStage, to_stage, req.user.id, reason || null);
+    await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by, reason) VALUES ($1, $2, $3, $4, $5, $6)',
+      [uuidv4(), order.id, fromStage, to_stage, req.user.id, reason || null]);
 
-  logActivity(db, { orderId: order.id, userId: req.user.id, action: 'stage_moved',
-    details: `${fromStage} → ${to_stage}${reason ? ': ' + reason : ''}`,
-    oldValue: fromStage, newValue: to_stage, ipAddress: req.ip });
+    await logActivity(q, { orderId: order.id, userId: req.user.id, action: 'stage_moved',
+      details: `${fromStage} → ${to_stage}${reason ? ': ' + reason : ''}`,
+      oldValue: fromStage, newValue: to_stage, ipAddress: req.ip });
 
-  // Notify PIC
-  if (order.pic_id && order.pic_id !== req.user.id) {
-    notify(db, {
-      userId: order.pic_id, type: 'order_stage_entered',
-      title: `Order ${order.invoice_number} moved to ${to_stage}`,
-      message: `Moved by ${req.user.name}`,
-      orderId: order.id
-    });
-  }
+    // Notify PIC
+    if (order.pic_id && order.pic_id !== req.user.id) {
+      await notify(q, {
+        userId: order.pic_id, type: 'order_stage_entered',
+        title: `Order ${order.invoice_number} moved to ${to_stage}`,
+        message: `Moved by ${req.user.name}`,
+        orderId: order.id
+      });
+    }
+  });
 
   res.json({ message: 'Order moved', from: fromStage, to: to_stage });
-});
+}));
 
 // POST /api/orders/:id/assign-pic
-router.post('/:id/assign-pic', authenticate, canMoveOrders, (req, res) => {
-  const db = getDb();
+router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
   const { pic_id } = req.body;
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const oldPic = order.pic_id;
-  db.prepare('UPDATE orders SET pic_id = ?, updated_at = datetime("now") WHERE id = ?').run(pic_id, order.id);
 
-  logActivity(db, { orderId: order.id, userId: req.user.id, action: 'pic_assigned',
-    details: `PIC changed`, oldValue: oldPic, newValue: pic_id, ipAddress: req.ip });
+  await withTransaction(async (q) => {
+    await q('UPDATE orders SET pic_id = $1, updated_at = now() WHERE id = $2', [pic_id || null, order.id]);
 
-  if (pic_id && pic_id !== req.user.id) {
-    notify(db, {
-      userId: pic_id, type: 'pic_assigned',
-      title: `You are assigned to order ${order.invoice_number}`,
-      orderId: order.id
-    });
-  }
+    await logActivity(q, { orderId: order.id, userId: req.user.id, action: 'pic_assigned',
+      details: `PIC changed`, oldValue: oldPic, newValue: pic_id, ipAddress: req.ip });
+
+    if (pic_id && pic_id !== req.user.id) {
+      await notify(q, {
+        userId: pic_id, type: 'pic_assigned',
+        title: `You are assigned to order ${order.invoice_number}`,
+        orderId: order.id
+      });
+    }
+  });
 
   res.json({ message: 'PIC assigned' });
-});
+}));
 
 // POST /api/orders/:id/attachments
-router.post('/:id/attachments', authenticate, upload.single('file'), (req, res) => {
+router.post('/:id/attachments', authenticate, upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  const db = getDb();
-  const order = db.prepare('SELECT id FROM orders WHERE id = ?').get(req.params.id);
+  const order = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const { path: storedPath, url } = await uploadBuffer(req.file, 'attachments/');
 
   const att = {
     id: uuidv4(), order_id: order.id,
-    filename: req.file.filename, original_name: req.file.originalname,
+    filename: storedPath, original_name: req.file.originalname,
     mime_type: req.file.mimetype, size: req.file.size,
     uploaded_by: req.user.id
   };
 
-  db.prepare(`
+  await query(`
     INSERT INTO order_attachments (id, order_id, filename, original_name, mime_type, size, uploaded_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(att.id, att.order_id, att.filename, att.original_name, att.mime_type, att.size, att.uploaded_by);
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+  `, [att.id, att.order_id, att.filename, att.original_name, att.mime_type, att.size, att.uploaded_by]);
 
-  logActivity(db, { orderId: order.id, userId: req.user.id, action: 'attachment_uploaded',
+  await logActivity(query, { orderId: order.id, userId: req.user.id, action: 'attachment_uploaded',
     details: req.file.originalname, ipAddress: req.ip });
 
-  res.status(201).json(att);
-});
+  res.status(201).json({ ...att, url });
+}));
 
 // POST /api/orders/webhook/sql-account — SQL Account integration
-router.post('/webhook/sql-account', (req, res) => {
+router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   // Validate webhook secret
   const secret = req.headers['x-webhook-secret'];
   if (secret !== process.env.SQL_ACCOUNT_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Invalid webhook secret' });
   }
 
-  const db = getDb();
   const { invoice_number, customer_name, customer_contact, required_delivery_date, items = [] } = req.body;
 
   if (!invoice_number || !customer_name) {
     return res.status(400).json({ error: 'Invalid payload' });
   }
 
-  const existing = db.prepare('SELECT id FROM orders WHERE invoice_number = ?').get(invoice_number);
+  const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [invoice_number])).rows[0];
   if (existing) return res.status(409).json({ error: 'Duplicate invoice', existing_id: existing.id });
 
-  const systemUser = db.prepare("SELECT id FROM users WHERE role = 'super_admin' LIMIT 1").get();
+  const systemUser = (await query("SELECT id FROM users WHERE role = 'super_admin' LIMIT 1")).rows[0];
+  if (!systemUser) return res.status(500).json({ error: 'No system user configured' });
+
   const orderId = uuidv4();
 
-  db.prepare(`
-    INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
-      order_date, required_delivery_date, stage, source, created_by)
-    VALUES (?, ?, ?, ?, date('now'), ?, 'order', 'sql_account', ?)
-  `).run(orderId, invoice_number, customer_name, customer_contact || null,
-    required_delivery_date, systemUser.id);
+  await withTransaction(async (q) => {
+    await q(`
+      INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
+        order_date, required_delivery_date, stage, source, created_by)
+      VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, 'order', 'sql_account', $6)
+    `, [orderId, invoice_number, customer_name, customer_contact || null,
+      required_delivery_date, systemUser.id]);
 
-  for (const item of items) {
-    db.prepare('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(uuidv4(), orderId, item.sku || 'N/A', item.name, item.quantity, item.unit || 'pcs');
-  }
+    for (const item of items) {
+      await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
+        [uuidv4(), orderId, item.sku || 'N/A', item.name, item.quantity, item.unit || 'pcs']);
+    }
+  });
 
   res.status(201).json({ id: orderId, invoice_number });
-});
+}));
 
 module.exports = router;

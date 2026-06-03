@@ -2,20 +2,26 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 
 const app = express();
 
 // ─── Middleware ───
+// FRONTEND_URL may be a comma-separated list of allowed origins.
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin(origin, cb) {
+    // Allow non-browser clients (no Origin header) and any whitelisted origin.
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error(`Origin ${origin} not allowed by CORS`));
+  },
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-
-// Serve uploaded files
-app.use('/uploads', express.static(path.resolve(process.env.UPLOAD_DIR || './uploads')));
 
 // ─── Routes ───
 app.use('/api/auth',          require('./routes/auth'));
@@ -37,14 +43,18 @@ app.use((req, res) => {
 });
 
 // ─── Error handler ───
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error(err.stack || err);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`
+// Only start a listener when run directly (local dev / traditional host).
+// On Vercel the app is imported by api/index.js and invoked per-request.
+if (require.main === module) {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`
 ╔══════════════════════════════════════════╗
 ║   Wawasan Candle OMS — Backend API       ║
 ║   Running on http://localhost:${PORT}       ║
@@ -60,9 +70,10 @@ app.listen(PORT, () => {
    GET    /api/reports/production
    GET    /api/reports/delivery
 
-💡 Run migrations first: node src/utils/migrate.js
-💡 Then seed data:        node src/utils/seed.js
+💡 Apply schema first:  npm run migrate
+💡 Then seed data:      npm run seed
   `);
-});
+  });
+}
 
 module.exports = app;

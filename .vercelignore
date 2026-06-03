@@ -1,0 +1,7 @@
+data/
+uploads/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
