@@ -1,6 +1,10 @@
 // src/lib/supabaseClient.js
 // Server-side Supabase client, used only for Storage (file uploads).
-// Uses the SERVICE ROLE key — keep it on the server, never expose to the browser.
+// Uses the SERVICE ROLE / secret key — keep it on the server, never expose it.
+//
+// The client is created LAZILY and defensively: a missing or malformed
+// SUPABASE_URL must never crash the whole API at startup — it should only
+// affect the file-upload endpoints.
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -9,20 +13,35 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'oms-uploads';
 
-const supabase =
-  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      })
-    : null;
+let _client;
+let _initialised = false;
+
+function getClient() {
+  if (!_initialised) {
+    _initialised = true;
+    if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+      try {
+        _client = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+      } catch (err) {
+        // e.g. invalid SUPABASE_URL — log and carry on without Storage.
+        console.error('⚠️  Failed to initialise Supabase Storage client:', err.message);
+        _client = null;
+      }
+    }
+  }
+  return _client;
+}
 
 function isStorageConfigured() {
-  return Boolean(supabase);
+  return Boolean(getClient());
 }
 
 // Upload an in-memory multer file to the Storage bucket.
 // Returns { path, url } where `path` is what we persist in the DB.
 async function uploadBuffer(file, prefix = '') {
+  const supabase = getClient();
   if (!supabase) {
     throw new Error('Supabase Storage is not configured (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)');
   }
@@ -39,4 +58,4 @@ async function uploadBuffer(file, prefix = '') {
   return { path: objectPath, url: data.publicUrl };
 }
 
-module.exports = { supabase, BUCKET, isStorageConfigured, uploadBuffer };
+module.exports = { getClient, BUCKET, isStorageConfigured, uploadBuffer };
