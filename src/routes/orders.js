@@ -91,7 +91,8 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const sql = `
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
-      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
+      (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE order_id = o.id) AS total_units
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     WHERE o.stage NOT IN ('delivered','cancelled')
@@ -108,6 +109,20 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   }
 
   res.json(board);
+}));
+
+// GET /api/orders/stats — lightweight board stats (any authenticated user)
+router.get('/stats', authenticate, asyncHandler(async (req, res) => {
+  const active = (await query(
+    "SELECT COUNT(*)::int AS c FROM orders WHERE stage NOT IN ('delivered','cancelled')"
+  )).rows[0].c;
+  const completedToday = (await query(
+    "SELECT COUNT(*)::int AS c FROM stage_transitions WHERE to_stage = 'delivered' AND created_at::date = CURRENT_DATE"
+  )).rows[0].c;
+  const overdue = (await query(
+    "SELECT COUNT(*)::int AS c FROM orders WHERE required_delivery_date < CURRENT_DATE AND stage NOT IN ('delivered','cancelled')"
+  )).rows[0].c;
+  res.json({ active, completed_today: completedToday, overdue });
 }));
 
 // GET /api/orders/:id
