@@ -377,27 +377,67 @@ router.patch('/:id/flags', authenticate, canMoveOrders, asyncHandler(async (req,
   res.json({ message: 'Flags updated' });
 }));
 
-// PATCH /api/orders/:id/items/:itemId — mark a line item made / not made
+// PATCH /api/orders/:id/items/:itemId — mark made (stage staff) or edit fields (Ops/Admin)
 router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'production_lead', 'production_staff', 'packing_staff'];
-  if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureItemColumns();
-
   const item = (await query(
     'SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [req.params.itemId, req.params.id]
   )).rows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
 
-  const made = !!req.body.made;
-  await query(
-    'UPDATE order_items SET made = $1, made_at = $2, made_by = $3 WHERE id = $4',
-    [made, made ? new Date().toISOString() : null, made ? req.user.id : null, req.params.itemId]
-  );
+  const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
+  const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
+  const b = req.body || {};
+  const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
+  if (editingFields && !isManager) return res.status(403).json({ error: 'Only Ops/Admin can edit item details' });
+  if (b.made !== undefined && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
+
+  const sets = [];
+  const vals = [];
+  if (b.made !== undefined) {
+    const made = !!b.made;
+    sets.push(`made = $${vals.push(made)}`);
+    sets.push(`made_at = $${vals.push(made ? new Date().toISOString() : null)}`);
+    sets.push(`made_by = $${vals.push(made ? req.user.id : null)}`);
+  }
+  if (b.sku !== undefined) sets.push(`sku = $${vals.push(b.sku)}`);
+  if (b.name !== undefined) sets.push(`name = $${vals.push(b.name)}`);
+  if (b.unit !== undefined) sets.push(`unit = $${vals.push(b.unit)}`);
+  if (b.quantity !== undefined) sets.push(`quantity = $${vals.push(Number(b.quantity) || 0)}`);
+  if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+  const idIdx = vals.push(req.params.itemId);
+  await query(`UPDATE order_items SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
   await logActivity(query, {
-    orderId: req.params.id, userId: req.user.id, action: made ? 'item_made' : 'item_reopened',
-    details: `${item.sku} — ${item.name} ${made ? 'marked made' : 'reopened'}`, ipAddress: req.ip || null,
+    orderId: req.params.id, userId: req.user.id,
+    action: b.made !== undefined ? (b.made ? 'item_made' : 'item_reopened') : 'item_edited',
+    details: `${item.sku} — ${item.name}`, ipAddress: req.ip || null,
   });
-  res.json({ id: req.params.itemId, made });
+  res.json({ ok: true });
+}));
+
+// POST /api/orders/:id/items — add a line item (Ops/Admin)
+router.post('/:id/items', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+  const order = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const { sku, name, quantity, unit } = req.body;
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const id = uuidv4();
+  await query(
+    'INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
+    [id, req.params.id, sku || 'N/A', name, Number(quantity) || 1, unit || 'pcs']
+  );
+  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'item_added', details: `${sku || ''} ${name}`.trim(), ipAddress: req.ip || null });
+  res.status(201).json({ id });
+}));
+
+// DELETE /api/orders/:id/items/:itemId — remove a line item (Ops/Admin)
+router.delete('/:id/items/:itemId', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+  const item = (await query('SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [req.params.itemId, req.params.id])).rows[0];
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  await query('DELETE FROM order_items WHERE id = $1', [req.params.itemId]);
+  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'item_removed', details: `${item.sku} — ${item.name}`, ipAddress: req.ip || null });
+  res.json({ ok: true });
 }));
 
 // POST /api/orders/:id/attachments
