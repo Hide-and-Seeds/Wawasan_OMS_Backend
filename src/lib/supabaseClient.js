@@ -67,4 +67,12 @@ function publicUrl(objectPath) {
   return null;
 }
 
-module.exports = { getClient, BUCKET, isStorageConfigured, uploadBuffer, publicUrl };
+// Delete an object from the bucket (frees storage). Best-effort.
+async function removeObject(objectPath) {
+  if (!objectPath) return;
+  const client = getClient();
+  if (!client) return;
+  await client.storage.from(BUCKET).remove([objectPath]);
+}
+
+module.exports = { getClient, BUCKET, isStorageConfigured, uploadBuffer, publicUrl, removeObject };

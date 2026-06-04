@@ -6,14 +6,30 @@ const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
 const { authenticate, canMoveOrders } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
-const { uploadBuffer, publicUrl } = require('../lib/supabaseClient');
+const { uploadBuffer, publicUrl, removeObject } = require('../lib/supabaseClient');
 
 // Files are buffered in memory then streamed to Supabase Storage
 // (the local filesystem is ephemeral on serverless hosts like Vercel).
+const MAX_UPLOAD = parseInt(process.env.MAX_FILE_SIZE) || 5 * 1024 * 1024; // 5 MB default
+const ALLOWED_MIME = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10485760 },
+  limits: { fileSize: MAX_UPLOAD },
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_MIME.includes(file.mimetype)) return cb(null, true);
+    cb(new Error('Unsupported file type — please upload a PDF or an image'));
+  },
 });
+// Wrap multer so size/type errors return a clean message instead of a generic 500.
+function uploadSingle(field) {
+  return (req, res, next) => upload.single(field)(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `File too large — max ${Math.round(MAX_UPLOAD / 1048576)} MB` });
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}
 
 const VALID_STAGES = ['order', 'production', 'packing', 'ready_for_delivery', 'delivered', 'cancelled', 'on_hold'];
 // Forward workflow + which staff roles "own" (may complete) each stage.
@@ -441,7 +457,7 @@ router.delete('/:id/items/:itemId', authenticate, canMoveOrders, asyncHandler(as
 }));
 
 // POST /api/orders/:id/attachments
-router.post('/:id/attachments', authenticate, upload.single('file'), asyncHandler(async (req, res) => {
+router.post('/:id/attachments', authenticate, uploadSingle('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const order = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
@@ -467,6 +483,16 @@ router.post('/:id/attachments', authenticate, upload.single('file'), asyncHandle
     details: req.file.originalname, ipAddress: req.ip });
 
   res.status(201).json({ ...att, url });
+}));
+
+// DELETE /api/orders/:id/attachments/:attId — remove an attachment + its file (Ops/Admin)
+router.delete('/:id/attachments/:attId', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+  const att = (await query('SELECT * FROM order_attachments WHERE id = $1 AND order_id = $2', [req.params.attId, req.params.id])).rows[0];
+  if (!att) return res.status(404).json({ error: 'Attachment not found' });
+  try { await removeObject(att.filename); } catch (e) { /* best-effort: still remove the record */ }
+  await query('DELETE FROM order_attachments WHERE id = $1', [req.params.attId]);
+  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'attachment_removed', details: att.original_name, ipAddress: req.ip || null });
+  res.json({ ok: true });
 }));
 
 // POST /api/orders/webhook/sql-account — SQL Account integration
