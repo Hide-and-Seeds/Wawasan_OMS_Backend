@@ -46,6 +46,17 @@ async function ensureItemColumns() {
   _itemColsReady = true;
 }
 
+// Self-migration: hold / waiting-stock are overlay flags so an order keeps its
+// workflow stage while showing a badge (rather than moving to an 'on_hold' stage).
+let _orderFlagsReady = false;
+async function ensureOrderFlags() {
+  if (_orderFlagsReady) return;
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS on_hold boolean NOT NULL DEFAULT false');
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiting_stock boolean NOT NULL DEFAULT false');
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS hold_reason text');
+  _orderFlagsReady = true;
+}
+
 // GET /api/orders — list with filters
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { stage, priority, search, week, from, to, page = 1, limit = 50 } = req.query;
@@ -95,6 +106,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const { week } = req.query;
   await ensureItemColumns();
+  await ensureOrderFlags();
 
   const weekFilter = week === 'current'
     ? "AND date_trunc('week', o.required_delivery_date) = date_trunc('week', now())"
@@ -319,6 +331,37 @@ router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (
   });
 
   res.json({ message: 'PIC assigned' });
+}));
+
+// PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags
+router.patch('/:id/flags', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+  await ensureOrderFlags();
+  const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const sets = [];
+  const vals = [];
+  const acts = [];
+  if (req.body.on_hold !== undefined) {
+    sets.push(`on_hold = $${vals.push(!!req.body.on_hold)}`);
+    sets.push(`hold_reason = $${vals.push(req.body.reason || null)}`);
+    acts.push(req.body.on_hold ? 'put on hold' : 'released from hold');
+  }
+  if (req.body.waiting_stock !== undefined) {
+    sets.push(`waiting_stock = $${vals.push(!!req.body.waiting_stock)}`);
+    acts.push(req.body.waiting_stock ? 'flagged waiting stock' : 'cleared waiting stock');
+  }
+  if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+  sets.push('updated_at = now()');
+  const idIdx = vals.push(req.params.id);
+  await query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
+
+  await logActivity(query, {
+    orderId: req.params.id, userId: req.user.id, action: 'order_flagged',
+    details: `${order.invoice_number}: ${acts.join(', ')}`, ipAddress: req.ip || null,
+  });
+  res.json({ message: 'Flags updated' });
 }));
 
 // PATCH /api/orders/:id/items/:itemId — mark a line item made / not made
