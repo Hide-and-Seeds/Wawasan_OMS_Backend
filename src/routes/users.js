@@ -7,6 +7,9 @@ const { query } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
+// Roles allowed to manage staff accounts (create / reset password / enable-disable).
+const USER_MANAGERS = ['super_admin', 'operations_controller'];
+
 // GET /api/users
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   const users = (await query(`
@@ -30,11 +33,14 @@ router.get('/workload', authenticate, asyncHandler(async (req, res) => {
   res.json(workload);
 }));
 
-// POST /api/users — create user (admin only)
-router.post('/', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+// POST /api/users — create user (Super Admin or Ops Controller)
+router.post('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
   const { name, email, role, password, avatar_color } = req.body;
   if (!name || !email || !role || !password) {
     return res.status(400).json({ error: 'name, email, role, password are required' });
+  }
+  if (role === 'super_admin' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Only a Super Admin can create another Super Admin' });
   }
 
   const existing = (await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()])).rows[0];
@@ -50,9 +56,18 @@ router.post('/', authenticate, authorize('super_admin'), asyncHandler(async (req
   res.status(201).json({ id, name, email, role });
 }));
 
-// PATCH /api/users/:id
-router.patch('/:id', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+// PATCH /api/users/:id — update / reset password / enable-disable
+router.patch('/:id', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+  const target = (await query('SELECT id, role FROM users WHERE id = $1', [req.params.id])).rows[0];
+  if (!target) return res.status(404).json({ error: 'User not found' });
+
   const { name, role, avatar_color, is_active, password } = req.body;
+
+  // Only a Super Admin may modify a Super Admin account or grant the Super Admin role.
+  if ((target.role === 'super_admin' || role === 'super_admin') && req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Only a Super Admin can manage Super Admin accounts' });
+  }
+
   const updates = [];
   const values = [];
 
