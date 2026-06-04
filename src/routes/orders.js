@@ -18,7 +18,7 @@ const upload = multer({
 const VALID_STAGES = ['order', 'production', 'packing', 'ready_for_delivery', 'delivered', 'cancelled', 'on_hold'];
 // Forward workflow + which staff roles "own" (may complete) each stage.
 const FORWARD_STAGE = { order: 'production', production: 'packing', packing: 'ready_for_delivery', ready_for_delivery: 'delivered' };
-const STAGE_OWNERS = { production: ['production_staff', 'production_lead'], packing: ['packing_staff'] };
+const STAGE_OWNERS = { production: ['production_staff'], packing: ['packing_staff'] };
 
 // Helper: log activity. `q` is a query runner (global query, or a tx client).
 function logActivity(q, { orderId, userId, action, details, oldValue, newValue, ipAddress }) {
