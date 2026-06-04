@@ -16,6 +16,9 @@ const upload = multer({
 });
 
 const VALID_STAGES = ['order', 'production', 'packing', 'ready_for_delivery', 'delivered', 'cancelled', 'on_hold'];
+// Forward workflow + which staff roles "own" (may complete) each stage.
+const FORWARD_STAGE = { order: 'production', production: 'packing', packing: 'ready_for_delivery', ready_for_delivery: 'delivered' };
+const STAGE_OWNERS = { production: ['production_staff', 'production_lead'], packing: ['packing_staff'] };
 
 // Helper: log activity. `q` is a query runner (global query, or a tx client).
 function logActivity(q, { orderId, userId, action, details, oldValue, newValue, ipAddress }) {
@@ -270,7 +273,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // POST /api/orders/:id/move — move to next/specific stage
-router.post('/:id/move', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   const { to_stage, reason } = req.body;
 
   if (!VALID_STAGES.includes(to_stage)) {
@@ -281,6 +284,15 @@ router.post('/:id/move', authenticate, canMoveOrders, asyncHandler(async (req, r
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const fromStage = order.stage;
+
+  // Managers move freely; stage staff may only advance their own stage forward one step.
+  if (!['super_admin', 'operations_controller'].includes(req.user.role)) {
+    if (order.on_hold) return res.status(403).json({ error: 'Order is on hold' });
+    const owners = STAGE_OWNERS[fromStage] || [];
+    if (!owners.includes(req.user.role) || to_stage !== FORWARD_STAGE[fromStage]) {
+      return res.status(403).json({ error: 'You can only mark your own stage complete' });
+    }
+  }
 
   await withTransaction(async (q) => {
     await q('UPDATE orders SET stage = $1, updated_at = now() WHERE id = $2', [to_stage, order.id]);
