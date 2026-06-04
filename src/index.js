@@ -47,6 +47,7 @@ app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/remarks',       require('./routes/remarks'));
 app.use('/api/reports',       require('./routes/reports'));
 app.use('/api/delivery',      require('./routes/delivery'));
+app.use('/api/settings',      require('./routes/settings'));
 
 // ─── Health check ───
 app.get('/api/health', (req, res) => {
