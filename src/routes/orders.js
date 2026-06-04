@@ -295,7 +295,8 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   }
 
   await withTransaction(async (q) => {
-    await q('UPDATE orders SET stage = $1, updated_at = now() WHERE id = $2', [to_stage, order.id]);
+    // Clear the PIC on a stage change so the next stage's owner is assigned fresh.
+    await q('UPDATE orders SET stage = $1, pic_id = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
 
     await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by, reason) VALUES ($1, $2, $3, $4, $5, $6)',
       [uuidv4(), order.id, fromStage, to_stage, req.user.id, reason || null]);
