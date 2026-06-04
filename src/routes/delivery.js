@@ -77,8 +77,8 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
 
   let signatureFile = null;
   if (req.file) {
-    const { path: storedPath } = await uploadBuffer(req.file, 'signatures/');
-    signatureFile = storedPath;
+    try { const { path: storedPath } = await uploadBuffer(req.file, 'signatures/'); signatureFile = storedPath; }
+    catch (e) { return res.status(502).json({ error: `Signature upload failed: ${e.message}` }); }
   }
 
   await withTransaction(async (q) => {

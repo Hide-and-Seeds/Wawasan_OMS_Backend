@@ -447,7 +447,9 @@ router.post('/:id/attachments', authenticate, upload.single('file'), asyncHandle
   const order = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const { path: storedPath, url } = await uploadBuffer(req.file, 'attachments/');
+  let storedPath, url;
+  try { ({ path: storedPath, url } = await uploadBuffer(req.file, 'attachments/')); }
+  catch (e) { return res.status(502).json({ error: `Attachment upload failed: ${e.message}` }); }
 
   const att = {
     id: uuidv4(), order_id: order.id,
