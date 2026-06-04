@@ -10,8 +10,8 @@ const asyncHandler = require('../utils/asyncHandler');
 // Roles allowed to manage staff accounts (create / reset password / enable-disable).
 const USER_MANAGERS = ['super_admin', 'operations_controller'];
 
-// GET /api/users
-router.get('/', authenticate, asyncHandler(async (req, res) => {
+// GET /api/users — staff list (managers only)
+router.get('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
   const users = (await query(`
     SELECT id, name, email, role, avatar_color, is_active, created_at
     FROM users ORDER BY name ASC
