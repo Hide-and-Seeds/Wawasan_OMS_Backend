@@ -58,4 +58,13 @@ async function uploadBuffer(file, prefix = '') {
   return { path: objectPath, url: data.publicUrl };
 }
 
-module.exports = { getClient, BUCKET, isStorageConfigured, uploadBuffer };
+// Public URL for a stored object (bucket must be public for this to resolve).
+function publicUrl(objectPath) {
+  if (!objectPath) return null;
+  const client = getClient();
+  if (client) { const { data } = client.storage.from(BUCKET).getPublicUrl(objectPath); return data && data.publicUrl; }
+  if (SUPABASE_URL) return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${objectPath}`;
+  return null;
+}
+
+module.exports = { getClient, BUCKET, isStorageConfigured, uploadBuffer, publicUrl };

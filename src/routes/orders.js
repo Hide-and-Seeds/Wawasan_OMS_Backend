@@ -6,7 +6,7 @@ const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
 const { authenticate, canMoveOrders } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
-const { uploadBuffer } = require('../lib/supabaseClient');
+const { uploadBuffer, publicUrl } = require('../lib/supabaseClient');
 
 // Files are buffered in memory then streamed to Supabase Storage
 // (the local filesystem is ephemeral on serverless hosts like Vercel).
@@ -170,7 +170,7 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
     SELECT a.*, u.name AS uploaded_by_name FROM order_attachments a
     JOIN users u ON a.uploaded_by = u.id
     WHERE a.order_id = $1 ORDER BY a.uploaded_at DESC
-  `, [order.id])).rows;
+  `, [order.id])).rows.map((a) => ({ ...a, url: publicUrl(a.filename) }));
   const activity = (await query(`
     SELECT al.*, u.name AS user_name FROM activity_log al
     JOIN users u ON al.user_id = u.id
