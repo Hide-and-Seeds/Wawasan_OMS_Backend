@@ -62,6 +62,7 @@ create table if not exists orders (
     'order','production','packing','ready_for_delivery','delivered','cancelled','on_hold'
   )),
   priority               text not null default 'normal' check (priority in ('normal','urgent')),
+  importance             text not null default 'standard' check (importance in ('standard','priority','vip')),
   skip_production        boolean not null default false,
   pic_id                 uuid references users(id),
   notes                  text,

@@ -36,6 +36,17 @@ const VALID_STAGES = ['order', 'production', 'packing', 'ready_for_delivery', 'd
 const FORWARD_STAGE = { order: 'production', production: 'packing', packing: 'ready_for_delivery', ready_for_delivery: 'delivered' };
 const STAGE_OWNERS = { production: ['production_staff'], packing: ['packing_staff'] };
 
+// Customer importance tiers — a per-order classification of how important the
+// customer is, separate from `priority` (which flags a rush order). Low → high.
+const VALID_IMPORTANCE = ['standard', 'priority', 'vip'];
+// Production-floor roles must not see *who* the customer is; they get the
+// importance tier in its place. Ops/Admin and delivery_team keep the name.
+const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_staff'];
+function scrubCustomer(order, role) {
+  if (!order || !CUSTOMER_HIDDEN_ROLES.includes(role)) return order;
+  return { ...order, customer_name: null, customer_contact: null };
+}
+
 // Helper: log activity. `q` is a query runner (global query, or a tx client).
 function logActivity(q, { orderId, userId, action, details, oldValue, newValue, ipAddress }) {
   return q(
@@ -79,10 +90,20 @@ async function ensureOrderFlags() {
   _orderFlagsReady = true;
 }
 
+// Self-migration: customer importance tier. Additive, so follow the
+// ADD COLUMN IF NOT EXISTS pattern; the allowed value set is enforced in app code.
+let _importanceReady = false;
+async function ensureImportance() {
+  if (_importanceReady) return;
+  await query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS importance text NOT NULL DEFAULT 'standard'");
+  _importanceReady = true;
+}
+
 // GET /api/orders — list with filters
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { stage, priority, search, week, from, to, page = 1, limit = 50 } = req.query;
   const offset = (parseInt(page) - 1) * parseInt(limit);
+  await ensureImportance();
 
   const where = ['1=1'];
   const params = [];
@@ -120,7 +141,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const orders = (await query(sql, params)).rows;
+  const orders = (await query(sql, params)).rows.map((o) => scrubCustomer(o, req.user.role));
   res.json({ orders, total, page: parseInt(page), limit: parseInt(limit) });
 }));
 
@@ -129,6 +150,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const { week } = req.query;
   await ensureItemColumns();
   await ensureOrderFlags();
+  await ensureImportance();
 
   const weekFilter = week === 'current'
     ? "AND date_trunc('week', o.required_delivery_date) = date_trunc('week', now())"
@@ -153,7 +175,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const allOrders = (await query(sql)).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
   for (const o of allOrders) {
-    if (board[o.stage]) board[o.stage].push(o);
+    if (board[o.stage]) board[o.stage].push(scrubCustomer(o, req.user.role));
   }
 
   res.json(board);
@@ -175,6 +197,7 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
 
 // GET /api/orders/:id
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
+  await ensureImportance();
   const order = (await query(`
     SELECT o.*, u.name AS pic_name, u.avatar_color AS pic_color, cb.name AS created_by_name
     FROM orders o
@@ -202,7 +225,7 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
     WHERE st.order_id = $1 ORDER BY st.created_at ASC
   `, [order.id])).rows;
 
-  res.json({ ...order, items, attachments, activity, transitions });
+  res.json(scrubCustomer({ ...order, items, attachments, activity, transitions }, req.user.role));
 }));
 
 // POST /api/orders — create order
@@ -211,15 +234,19 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (!allowed.includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
+  await ensureImportance();
 
   const {
     invoice_number, customer_name, customer_contact,
     order_date, required_delivery_date, expiry_date,
-    priority = 'normal', skip_production = false, pic_id, notes, items = []
+    priority = 'normal', importance = 'standard', skip_production = false, pic_id, notes, items = []
   } = req.body;
 
   if (!invoice_number || !customer_name || !required_delivery_date) {
     return res.status(400).json({ error: 'invoice_number, customer_name, required_delivery_date are required' });
+  }
+  if (!VALID_IMPORTANCE.includes(importance)) {
+    return res.status(400).json({ error: 'Invalid importance level' });
   }
 
   // Duplicate check
@@ -232,13 +259,13 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   await withTransaction(async (q) => {
     await q(`
       INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
-        order_date, required_delivery_date, expiry_date, stage, priority,
+        order_date, required_delivery_date, expiry_date, stage, priority, importance,
         skip_production, pic_id, notes, source, created_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'manual', $13)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'manual', $14)
     `, [orderId, invoice_number, customer_name, customer_contact || null,
       order_date || new Date().toISOString().slice(0, 10),
       required_delivery_date, expiry_date || null,
-      initialStage, priority, Boolean(skip_production),
+      initialStage, priority, importance, Boolean(skip_production),
       pic_id || null, notes || null, req.user.id]);
 
     for (const item of items) {
@@ -265,10 +292,15 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
 
+  await ensureImportance();
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const fields = ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'notes', 'pic_id'];
+  if (req.body.importance !== undefined && !VALID_IMPORTANCE.includes(req.body.importance)) {
+    return res.status(400).json({ error: 'Invalid importance level' });
+  }
+
+  const fields = ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'importance', 'notes', 'pic_id'];
   const updates = [];
   const values = [];
 

@@ -27,11 +27,11 @@ const defaultSettings = [
 ];
 
 const sampleOrders = [
-  { invoice: 'INV-2024-001', customer: 'Kedai Bunga Jaya', contact: '0123456789', stage: 'production',          priority: 'urgent', daysFromNow: 2 },
-  { invoice: 'INV-2024-002', customer: 'Harumni Sdn Bhd',  contact: '0187654321', stage: 'order',               priority: 'normal', daysFromNow: 7 },
-  { invoice: 'INV-2024-003', customer: 'Candle World KL',  contact: '0165551234', stage: 'packing',             priority: 'normal', daysFromNow: 5 },
-  { invoice: 'INV-2024-004', customer: 'Gift House Subang',contact: '0112223344', stage: 'ready_for_delivery',  priority: 'urgent', daysFromNow: 1 },
-  { invoice: 'INV-2024-005', customer: 'Aromatherapy Plus',contact: '0145556677', stage: 'order',               priority: 'normal', daysFromNow: 10 },
+  { invoice: 'INV-2024-001', customer: 'Kedai Bunga Jaya', contact: '0123456789', stage: 'production',          priority: 'urgent', importance: 'vip',      daysFromNow: 2 },
+  { invoice: 'INV-2024-002', customer: 'Harumni Sdn Bhd',  contact: '0187654321', stage: 'order',               priority: 'normal', importance: 'standard', daysFromNow: 7 },
+  { invoice: 'INV-2024-003', customer: 'Candle World KL',  contact: '0165551234', stage: 'packing',             priority: 'normal', importance: 'priority', daysFromNow: 5 },
+  { invoice: 'INV-2024-004', customer: 'Gift House Subang',contact: '0112223344', stage: 'ready_for_delivery',  priority: 'urgent', importance: 'vip',      daysFromNow: 1 },
+  { invoice: 'INV-2024-005', customer: 'Aromatherapy Plus',contact: '0145556677', stage: 'order',               priority: 'normal', importance: 'standard', daysFromNow: 10 },
 ];
 
 async function main() {
@@ -69,12 +69,12 @@ async function main() {
         const inserted = (await query(
           `INSERT INTO orders
              (id, invoice_number, customer_name, customer_contact, order_date,
-              required_delivery_date, stage, priority, created_by)
+              required_delivery_date, stage, priority, importance, created_by)
            VALUES ($1, $2, $3, $4, CURRENT_DATE,
-              CURRENT_DATE + ($5 * INTERVAL '1 day'), $6, $7, $8)
+              CURRENT_DATE + ($5 * INTERVAL '1 day'), $6, $7, $8, $9)
            ON CONFLICT (invoice_number) DO NOTHING
            RETURNING id`,
-          [orderId, o.invoice, o.customer, o.contact, o.daysFromNow, o.stage, o.priority, admin.id]
+          [orderId, o.invoice, o.customer, o.contact, o.daysFromNow, o.stage, o.priority, o.importance, admin.id]
         )).rows[0];
 
         if (inserted) {
