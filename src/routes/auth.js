@@ -25,10 +25,14 @@ router.post('/login', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
+  // Session length is admin-configurable via the session_timeout_hours setting;
+  // fall back to JWT_EXPIRES_IN (or 8h) when it isn't set.
+  const timeoutRow = (await query("SELECT value FROM system_settings WHERE key = 'session_timeout_hours'")).rows[0];
+  const hours = Math.max(1, parseInt(timeoutRow && timeoutRow.value, 10) || parseInt(process.env.JWT_EXPIRES_IN, 10) || 8);
   const token = jwt.sign(
     { userId: user.id, role: user.role },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+    { expiresIn: `${hours}h` }
   );
 
   // Log login

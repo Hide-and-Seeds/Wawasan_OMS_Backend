@@ -85,4 +85,26 @@ router.patch('/:id', authenticate, authorize(...USER_MANAGERS), asyncHandler(asy
   res.json({ message: 'User updated' });
 }));
 
+// DELETE /api/users/:id — permanently remove a disabled account (managers).
+// Refuses on self, on a Super Admin (unless you are one), on an active account,
+// or when other rows still reference the user (FK) — those stay disabled.
+router.delete('/:id', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+  if (req.params.id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
+  const target = (await query('SELECT id, role, is_active FROM users WHERE id = $1', [req.params.id])).rows[0];
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (target.role === 'super_admin' && req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Only a Super Admin can delete a Super Admin account' });
+  }
+  if (target.is_active) return res.status(400).json({ error: 'Disable the user before deleting' });
+  try {
+    await query('DELETE FROM users WHERE id = $1', [req.params.id]);
+  } catch (e) {
+    if (e.code === '23503') {
+      return res.status(409).json({ error: 'This user has order or activity history and cannot be deleted — keep them disabled instead.' });
+    }
+    throw e;
+  }
+  res.json({ message: 'User deleted' });
+}));
+
 module.exports = router;

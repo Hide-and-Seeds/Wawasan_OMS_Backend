@@ -168,14 +168,17 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     WHERE o.stage NOT IN ('delivered','cancelled')
     ${weekFilter}
     ORDER BY
+      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
       CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
       o.invoice_number ASC
   `;
 
   const allOrders = (await query(sql)).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
+  // The board shows the customer name to every role (the floor view renders the
+  // importance tier instead, so no name leaks there). Order detail still scrubs.
   for (const o of allOrders) {
-    if (board[o.stage]) board[o.stage].push(scrubCustomer(o, req.user.role));
+    if (board[o.stage]) board[o.stage].push(o);
   }
 
   res.json(board);

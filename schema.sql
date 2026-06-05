@@ -166,6 +166,7 @@ create table if not exists deliveries (
   order_id        uuid not null references orders(id) on delete cascade,
   delivery_man_id uuid references users(id),
   scheduled_date  date,
+  address         text,
   delivered_at    timestamptz,
   signature_file  text,                 -- storage object path in the Supabase bucket
   status          text not null default 'pending' check (status in (

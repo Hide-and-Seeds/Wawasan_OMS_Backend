@@ -13,8 +13,17 @@ const upload = multer({
   limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10485760 },
 });
 
+// Self-migration: per-delivery address (additive, idempotent).
+let _addrReady = false;
+async function ensureDeliveryAddress() {
+  if (_addrReady) return;
+  await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS address text');
+  _addrReady = true;
+}
+
 // GET /api/delivery — list deliveries
 router.get('/', authenticate, asyncHandler(async (req, res) => {
+  await ensureDeliveryAddress();
   const { status, delivery_man_id, date } = req.query;
   const where = ['1=1'];
   const params = [];
@@ -40,8 +49,9 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 router.post('/', authenticate, asyncHandler(async (req, res) => {
   const allowed = ['super_admin', 'operations_controller'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  await ensureDeliveryAddress();
 
-  const { order_id, delivery_man_id, scheduled_date, notes } = req.body;
+  const { order_id, delivery_man_id, scheduled_date, address, notes } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
 
   const order = (await query("SELECT id FROM orders WHERE id = $1 AND stage = 'ready_for_delivery'", [order_id])).rows[0];
@@ -51,9 +61,9 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
   await withTransaction(async (q) => {
     await q(`
-      INSERT INTO deliveries (id, order_id, delivery_man_id, scheduled_date, notes)
-      VALUES ($1, $2, $3, $4, $5)
-    `, [id, order_id, delivery_man_id || null, scheduled_date || null, notes || null]);
+      INSERT INTO deliveries (id, order_id, delivery_man_id, scheduled_date, address, notes)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [id, order_id, delivery_man_id || null, scheduled_date || null, address || null, notes || null]);
 
     if (delivery_man_id) {
       await q(`
