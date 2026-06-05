@@ -383,6 +383,12 @@ router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
+  // When assigning (not clearing) a PIC, it must reference a real, active user.
+  if (pic_id) {
+    const picUser = (await query('SELECT id, is_active FROM users WHERE id = $1', [pic_id])).rows[0];
+    if (!picUser || !picUser.is_active) return res.status(400).json({ error: 'PIC must be an active user' });
+  }
+
   const oldPic = order.pic_id;
 
   await withTransaction(async (q) => {
@@ -450,6 +456,14 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   const progressing = b.made !== undefined || b.made_qty !== undefined;
   if (editingFields && !isManager) return res.status(403).json({ error: 'Only Ops/Admin can edit item details' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
+  // Stage staff may only record progress while the order sits in the stage they own.
+  if (progressing && !isManager) {
+    const PROGRESS_STAGES = { production_lead: ['production', 'packing'], production_staff: ['production'], packing_staff: ['packing'] };
+    const ord = (await query('SELECT stage FROM orders WHERE id = $1', [req.params.id])).rows[0];
+    if (!ord || !(PROGRESS_STAGES[req.user.role] || []).includes(ord.stage)) {
+      return res.status(403).json({ error: 'You can only update items while the order is in your stage' });
+    }
+  }
 
   const sets = [];
   const vals = [];

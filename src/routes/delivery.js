@@ -85,10 +85,16 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandler(async (req, res) => {
   const delivery = (await query('SELECT * FROM deliveries WHERE id = $1', [req.params.id])).rows[0];
   if (!delivery) return res.status(404).json({ error: 'Delivery not found' });
+  // Guard against double-completion (would write a duplicate delivered transition).
+  if (delivery.status === 'delivered') return res.status(409).json({ error: 'This delivery is already completed' });
 
   // Only delivery man or admin can mark delivered
   const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  // A driver may only complete a delivery assigned to them; managers complete any.
+  if (req.user.role === 'delivery_team' && delivery.delivery_man_id !== req.user.id) {
+    return res.status(403).json({ error: 'You can only complete deliveries assigned to you' });
+  }
 
   let signatureFile = null;
   if (req.file) {
