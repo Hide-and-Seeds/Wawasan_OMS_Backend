@@ -162,7 +162,8 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
       (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE order_id = o.id) AS total_units,
       (SELECT COALESCE(SUM(LEAST(made_qty, quantity)), 0)::int FROM order_items WHERE order_id = o.id) AS made_units,
-      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND made) AS made_count
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND made) AS made_count,
+      (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     WHERE o.stage NOT IN ('delivered','cancelled')
