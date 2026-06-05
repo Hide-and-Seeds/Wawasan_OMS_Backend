@@ -21,6 +21,9 @@ async function ensureDeliveryAddress() {
   _addrReady = true;
 }
 
+// Production-floor roles must not see the customer — mirror the scrub in orders.js.
+const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_staff'];
+
 // GET /api/delivery — list deliveries
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   await ensureDeliveryAddress();
@@ -43,7 +46,8 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     ORDER BY d.scheduled_date ASC, o.required_delivery_date ASC
   `, params)).rows;
 
-  res.json(deliveries);
+  const hideCustomer = CUSTOMER_HIDDEN_ROLES.includes(req.user.role);
+  res.json(hideCustomer ? deliveries.map((d) => ({ ...d, customer_name: null, address: null })) : deliveries);
 }));
 
 // POST /api/delivery — assign delivery

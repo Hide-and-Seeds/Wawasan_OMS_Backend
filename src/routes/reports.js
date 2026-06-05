@@ -8,7 +8,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const ADMIN_ROLES = ['super_admin', 'operations_controller'];
 
 // GET /api/reports/dashboard — boss overview
-router.get('/dashboard', authenticate, asyncHandler(async (req, res) => {
+router.get('/dashboard', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
   const stageCounts = (await query(`
     SELECT stage, COUNT(*)::int AS count FROM orders
     WHERE stage NOT IN ('delivered','cancelled')

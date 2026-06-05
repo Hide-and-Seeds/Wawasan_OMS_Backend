@@ -176,10 +176,11 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
 
   const allOrders = (await query(sql)).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
-  // The board shows the customer name to every role (the floor view renders the
-  // importance tier instead, so no name leaks there). Order detail still scrubs.
+  // Production-floor roles must not see the customer, so scrub like the list and
+  // detail endpoints do. The board card falls back to the importance tier when
+  // customer_name is null, so the UI stays intact for those roles.
   for (const o of allOrders) {
-    if (board[o.stage]) board[o.stage].push(o);
+    if (board[o.stage]) board[o.stage].push(scrubCustomer(o, req.user.role));
   }
 
   res.json(board);

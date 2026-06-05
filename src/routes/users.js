@@ -20,7 +20,7 @@ router.get('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (r
 }));
 
 // GET /api/users/workload
-router.get('/workload', authenticate, asyncHandler(async (req, res) => {
+router.get('/workload', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
   const workload = (await query(`
     SELECT u.id, u.name, u.avatar_color, u.role,
       COUNT(o.id)::int AS active_orders
