@@ -24,13 +24,14 @@ async function ensureDeliveryAddress() {
 // GET /api/delivery — list deliveries
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   await ensureDeliveryAddress();
-  const { status, delivery_man_id, date } = req.query;
+  const { status, delivery_man_id, date, order_id } = req.query;
   const where = ['1=1'];
   const params = [];
 
   if (status) { where.push(`d.status = $${params.push(status)}`); }
   if (delivery_man_id) { where.push(`d.delivery_man_id = $${params.push(delivery_man_id)}`); }
   if (date) { where.push(`d.scheduled_date = $${params.push(date)}`); }
+  if (order_id) { where.push(`d.order_id = $${params.push(order_id)}`); }
 
   const deliveries = (await query(`
     SELECT d.*, o.invoice_number, o.customer_name, o.required_delivery_date,
