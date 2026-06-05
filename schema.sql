@@ -84,6 +84,7 @@ create table if not exists order_items (
   made       boolean not null default false,
   made_at    timestamptz,
   made_by    uuid references users(id),
+  made_qty   integer not null default 0,
   created_at timestamptz not null default now()
 );
 

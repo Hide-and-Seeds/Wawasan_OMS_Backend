@@ -62,6 +62,9 @@ async function ensureItemColumns() {
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made boolean NOT NULL DEFAULT false');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_at timestamptz');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_by uuid REFERENCES users(id)');
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_qty integer NOT NULL DEFAULT 0');
+  // Backfill legacy fully-made rows so units-made matches the boolean.
+  await query('UPDATE order_items SET made_qty = quantity WHERE made = true AND made_qty = 0');
   _itemColsReady = true;
 }
 
@@ -136,6 +139,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       u.name AS pic_name, u.avatar_color AS pic_color,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
       (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE order_id = o.id) AS total_units,
+      (SELECT COALESCE(SUM(LEAST(made_qty, quantity)), 0)::int FROM order_items WHERE order_id = o.id) AS made_units,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND made) AS made_count
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
@@ -405,29 +409,44 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
   const b = req.body || {};
   const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
+  // `made` (bool, full toggle) and `made_qty` (int, partial completion) both report progress.
+  const progressing = b.made !== undefined || b.made_qty !== undefined;
   if (editingFields && !isManager) return res.status(403).json({ error: 'Only Ops/Admin can edit item details' });
-  if (b.made !== undefined && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
 
   const sets = [];
   const vals = [];
-  if (b.made !== undefined) {
-    const made = !!b.made;
-    sets.push(`made = $${vals.push(made)}`);
-    sets.push(`made_at = $${vals.push(made ? new Date().toISOString() : null)}`);
-    sets.push(`made_by = $${vals.push(made ? req.user.id : null)}`);
-  }
+  // Resolve effective quantity first so completion is clamped against the new value.
+  const qty = b.quantity !== undefined ? Math.max(0, Math.round(Number(b.quantity) || 0)) : Math.round(Number(item.quantity) || 0);
+  if (b.quantity !== undefined) sets.push(`quantity = $${vals.push(qty)}`);
   if (b.sku !== undefined) sets.push(`sku = $${vals.push(b.sku)}`);
   if (b.name !== undefined) sets.push(`name = $${vals.push(b.name)}`);
   if (b.unit !== undefined) sets.push(`unit = $${vals.push(b.unit)}`);
-  if (b.quantity !== undefined) sets.push(`quantity = $${vals.push(Number(b.quantity) || 0)}`);
+
+  // Determine new made_qty: explicit partial value, full-toggle, or clamp on a quantity shrink.
+  let madeQty = null;
+  if (b.made_qty !== undefined) madeQty = Math.max(0, Math.min(Math.round(Number(b.made_qty) || 0), qty));
+  else if (b.made !== undefined) madeQty = b.made ? qty : 0;
+  else if (b.quantity !== undefined) madeQty = Math.min(Math.round(Number(item.made_qty) || 0), qty);
+
+  let made = item.made;
+  if (madeQty !== null) {
+    made = qty > 0 && madeQty >= qty;
+    sets.push(`made_qty = $${vals.push(madeQty)}`);
+    sets.push(`made = $${vals.push(made)}`);
+    sets.push(`made_at = $${vals.push(madeQty > 0 ? new Date().toISOString() : null)}`);
+    sets.push(`made_by = $${vals.push(madeQty > 0 ? req.user.id : null)}`);
+  }
   if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
 
   const idIdx = vals.push(req.params.itemId);
   await query(`UPDATE order_items SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
+  let action = 'item_edited';
+  if (progressing) action = made ? 'item_made' : madeQty > 0 ? 'item_progress' : 'item_reopened';
   await logActivity(query, {
-    orderId: req.params.id, userId: req.user.id,
-    action: b.made !== undefined ? (b.made ? 'item_made' : 'item_reopened') : 'item_edited',
-    details: `${item.sku} — ${item.name}`, ipAddress: req.ip || null,
+    orderId: req.params.id, userId: req.user.id, action,
+    details: progressing ? `${item.sku} — ${item.name} (${madeQty}/${qty})` : `${item.sku} — ${item.name}`,
+    ipAddress: req.ip || null,
   });
   res.json({ ok: true });
 }));
