@@ -168,8 +168,8 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     WHERE o.stage NOT IN ('delivered','cancelled')
     ${weekFilter}
     ORDER BY
-      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
-      o.required_delivery_date ASC
+      CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
+      o.invoice_number ASC
   `;
 
   const allOrders = (await query(sql)).rows;
