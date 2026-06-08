@@ -6,6 +6,9 @@ const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
 const ADMIN_ROLES = ['super_admin', 'operations_controller'];
+// Floor supervisor sees production+packing reports; coordinator sees delivery. Boss/Ops see all.
+const PROD_REPORT_ROLES = ['super_admin', 'operations_controller', 'production_lead'];
+const DELIVERY_REPORT_ROLES = ['super_admin', 'operations_controller', 'delivery_team'];
 
 // GET /api/reports/dashboard — boss overview
 router.get('/dashboard', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
@@ -54,7 +57,7 @@ router.get('/dashboard', authenticate, authorize(...ADMIN_ROLES), asyncHandler(a
 }));
 
 // GET /api/reports/production — production performance
-router.get('/production', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/production', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
 
   let dateFilter = '';
@@ -131,7 +134,7 @@ router.get('/production', authenticate, authorize(...ADMIN_ROLES), asyncHandler(
 }));
 
 // GET /api/reports/packing — packing performance
-router.get('/packing', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { period = 'weekly' } = req.query;
 
   let dateFilter = '';
@@ -168,7 +171,7 @@ router.get('/packing', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asy
 }));
 
 // GET /api/reports/delivery — delivery performance
-router.get('/delivery', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { period = 'weekly' } = req.query;
 
   let dateFilter = '';
@@ -190,14 +193,15 @@ router.get('/delivery', authenticate, authorize(...ADMIN_ROLES), asyncHandler(as
   `)).rows[0];
 
   const byDeliveryMan = (await query(`
-    SELECT u.name, u.id,
+    SELECT COALESCE(dl.id, u.id) AS id, COALESCE(dl.name, u.name) AS name,
       COUNT(*)::int AS total,
       SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
     FROM deliveries d
-    JOIN users u ON d.delivery_man_id = u.id
+    LEFT JOIN deliverers dl ON d.deliverer_id = dl.id
+    LEFT JOIN users u ON d.delivery_man_id = u.id
     JOIN orders o ON d.order_id = o.id
     WHERE d.status = 'delivered' ${dateFilter}
-    GROUP BY u.id ORDER BY total DESC
+    GROUP BY COALESCE(dl.id, u.id), COALESCE(dl.name, u.name) ORDER BY total DESC
   `)).rows;
 
   res.json({
@@ -208,8 +212,82 @@ router.get('/delivery', authenticate, authorize(...ADMIN_ROLES), asyncHandler(as
   });
 }));
 
+// GET /api/reports/orders — per-order breakdown: progress, days-in-stage, cycle time,
+// per-stage durations and per-SKU status counts. Boss/Ops only (shows customer names).
+router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  const { period = 'weekly', from, to, stage } = req.query;
+
+  const where = ["o.stage <> 'cancelled'"];
+  const params = [];
+  if (from) { where.push(`o.required_delivery_date >= $${params.push(from)}`); }
+  if (to) { where.push(`o.required_delivery_date <= $${params.push(to)}`); }
+  if (!from && !to) {
+    if (period === 'daily') where.push('o.required_delivery_date = CURRENT_DATE');
+    else if (period === 'weekly') where.push("date_trunc('week', o.required_delivery_date) = date_trunc('week', now())");
+    else if (period === 'monthly') where.push("date_trunc('month', o.required_delivery_date) = date_trunc('month', now())");
+  }
+  if (stage) { where.push(`o.stage = $${params.push(stage)}`); }
+
+  const orders = (await query(`
+    SELECT o.id, o.invoice_number, o.customer_name, o.stage, o.priority, o.importance,
+      o.order_date, o.required_delivery_date, o.created_at,
+      u.name AS pic_name,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND status = 'done') AS done_count,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND status = 'in_progress') AS in_progress_count
+    FROM orders o
+    LEFT JOIN users u ON o.pic_id = u.id
+    WHERE ${where.join(' AND ')}
+    ORDER BY o.required_delivery_date ASC
+  `, params)).rows;
+
+  // Pull stage transitions for these orders → per-stage durations + days in current stage.
+  const ids = orders.map((o) => o.id);
+  const transByOrder = {};
+  if (ids.length) {
+    const trans = (await query(
+      `SELECT order_id, to_stage, created_at FROM stage_transitions
+       WHERE order_id = ANY($1::uuid[]) ORDER BY created_at ASC`, [ids]
+    )).rows;
+    for (const t of trans) (transByOrder[t.order_id] = transByOrder[t.order_id] || []).push(t);
+  }
+
+  const now = Date.now();
+  const hours = (ms) => Math.round((ms / 3600000) * 10) / 10;
+  const out = orders.map((o) => {
+    const ts = transByOrder[o.id] || [];
+    const stage_hours = {};
+    for (let i = 0; i < ts.length; i++) {
+      const start = new Date(ts[i].created_at).getTime();
+      const end = i + 1 < ts.length ? new Date(ts[i + 1].created_at).getTime() : now;
+      stage_hours[ts[i].to_stage] = hours((stage_hours[ts[i].to_stage] ? stage_hours[ts[i].to_stage] * 3600000 : 0) + (end - start));
+    }
+    const firstAt = ts.length ? new Date(ts[0].created_at).getTime() : new Date(o.created_at).getTime();
+    const lastAt = ts.length ? new Date(ts[ts.length - 1].created_at).getTime() : firstAt;
+    const delivered = o.stage === 'delivered';
+    const reqMs = o.required_delivery_date ? new Date(o.required_delivery_date).getTime() : null;
+    const total = o.item_count || 0;
+    return {
+      id: o.id, invoice_number: o.invoice_number, customer_name: o.customer_name,
+      stage: o.stage, priority: o.priority, importance: o.importance,
+      required_delivery_date: o.required_delivery_date, order_date: o.order_date,
+      pic_name: o.pic_name,
+      item_count: total, done_count: o.done_count || 0, in_progress_count: o.in_progress_count || 0,
+      not_started_count: Math.max(0, total - (o.done_count || 0) - (o.in_progress_count || 0)),
+      pct: total > 0 ? Math.round(((o.done_count || 0) / total) * 100) : 0,
+      days_in_stage: Math.floor((now - lastAt) / 86400000),
+      cycle_hours: hours((delivered ? lastAt : now) - firstAt),
+      delivered,
+      on_time: delivered && reqMs != null ? lastAt <= reqMs + 86400000 : null,
+      late: !delivered && reqMs != null && reqMs < now,
+      stage_hours,
+    };
+  });
+  res.json({ orders: out });
+}));
+
 // GET /api/reports/audit — audit trail (admin only)
-router.get('/audit', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+router.get('/audit', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
   const { user_id, action, from, to, page = 1, limit = 50 } = req.query;
   const offset = (parseInt(page) - 1) * parseInt(limit);
 

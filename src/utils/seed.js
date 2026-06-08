@@ -8,13 +8,17 @@ require('dotenv').config();
 const { getPool, query } = require('./db');
 
 const users = [
-  { name: 'Boss Admin',  email: 'admin@wawasancandle.com',  role: 'super_admin',           password: 'Admin@123',  avatar_color: '#7C3AED' },
-  { name: 'Reenee',      email: 'reenee@wawasancandle.com', role: 'operations_controller', password: 'Reenee@123', avatar_color: '#0891B2' },
-  { name: 'Misha',       email: 'misha@wawasancandle.com',  role: 'production_lead',        password: 'Misha@123',  avatar_color: '#059669' },
-  { name: 'Staff Ali',   email: 'ali@wawasancandle.com',    role: 'production_staff',       password: 'Staff@123',  avatar_color: '#D97706' },
-  { name: 'Staff Siti',  email: 'siti@wawasancandle.com',   role: 'packing_staff',          password: 'Staff@123',  avatar_color: '#DB2777' },
-  { name: 'Driver Raju', email: 'raju@wawasancandle.com',   role: 'delivery_team',          password: 'Driver@123', avatar_color: '#DC2626' },
+  { name: 'Boss',                 email: 'admin@wawasancandle.com',    role: 'super_admin',           password: 'Admin@123',    avatar_color: '#7C3AED' },
+  { name: 'Office Admin',         email: 'office@wawasancandle.com',   role: 'admin',                 password: 'Office@123',   avatar_color: '#9333EA' },
+  { name: 'Reenee',               email: 'reenee@wawasancandle.com',   role: 'operations_controller', password: 'Reenee@123',   avatar_color: '#0891B2' },
+  { name: 'Misha',                email: 'misha@wawasancandle.com',    role: 'production_lead',        password: 'Misha@123',    avatar_color: '#059669' },
+  { name: 'Staff Ali',            email: 'ali@wawasancandle.com',      role: 'production_staff',       password: 'Staff@123',    avatar_color: '#D97706' },
+  { name: 'Staff Siti',           email: 'siti@wawasancandle.com',     role: 'packing_staff',          password: 'Staff@123',    avatar_color: '#DB2777' },
+  { name: 'Delivery Coordinator', email: 'dispatch@wawasancandle.com', role: 'delivery_team',          password: 'Dispatch@123', avatar_color: '#0EA5E9' },
 ];
+
+// No-login deliverers (drivers). Managed in-app under Delivery → Deliverers.
+const deliverers = ['Raju', 'Ahmad', 'Lim Wei'];
 
 const defaultSettings = [
   ['stage_order_name', 'Order'],
@@ -51,6 +55,14 @@ async function main() {
         [uuidv4(), user.name, user.email, hashed, user.role, user.avatar_color]
       );
       console.log(`✅ Ensured user: ${user.email} (${user.role}) — password: ${user.password}`);
+    }
+
+    for (const name of deliverers) {
+      const exists = (await query('SELECT 1 FROM deliverers WHERE name = $1', [name])).rows[0];
+      if (!exists) {
+        await query('INSERT INTO deliverers (id, name) VALUES ($1, $2)', [uuidv4(), name]);
+        console.log(`✅ Ensured deliverer: ${name}`);
+      }
     }
 
     for (const [key, value] of defaultSettings) {

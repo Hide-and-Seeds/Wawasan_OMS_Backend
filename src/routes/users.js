@@ -8,7 +8,7 @@ const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
 // Roles allowed to manage staff accounts (create / reset password / enable-disable).
-const USER_MANAGERS = ['super_admin', 'operations_controller'];
+const USER_MANAGERS = ['super_admin', 'admin', 'operations_controller'];
 
 // GET /api/users — staff list (managers only)
 router.get('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {

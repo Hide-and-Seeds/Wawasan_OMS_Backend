@@ -15,7 +15,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // PUT /api/settings — upsert a batch of settings (admin)
-router.put('/', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+router.put('/', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
   const settings = req.body.settings || {};
   for (const [key, value] of Object.entries(settings)) {
     await query(
@@ -36,7 +36,7 @@ router.get('/holidays', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // POST /api/settings/holidays (admin)
-router.post('/holidays', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+router.post('/holidays', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
   const { date, name } = req.body;
   if (!date || !name) return res.status(400).json({ error: 'date and name are required' });
   const id = uuidv4();
@@ -45,7 +45,7 @@ router.post('/holidays', authenticate, authorize('super_admin'), asyncHandler(as
 }));
 
 // DELETE /api/settings/holidays/:id (admin)
-router.delete('/holidays/:id', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+router.delete('/holidays/:id', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
   await query('DELETE FROM holidays WHERE id = $1', [req.params.id]);
   res.json({ message: 'Holiday removed' });
 }));

@@ -14,11 +14,19 @@ const upload = multer({
 });
 
 // Self-migration: per-delivery address (additive, idempotent).
-let _addrReady = false;
-async function ensureDeliveryAddress() {
-  if (_addrReady) return;
+let _delSchemaReady = false;
+async function ensureDeliverySchema() {
+  if (_delSchemaReady) return;
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS address text');
-  _addrReady = true;
+  await query(`CREATE TABLE IF NOT EXISTS deliverers (
+    id         uuid primary key default gen_random_uuid(),
+    name       text not null,
+    phone      text,
+    is_active  boolean not null default true,
+    created_at timestamptz not null default now()
+  )`);
+  await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliverer_id uuid REFERENCES deliverers(id)');
+  _delSchemaReady = true;
 }
 
 // Production-floor roles must not see the customer — mirror the scrub in orders.js.
@@ -26,7 +34,7 @@ const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_s
 
 // GET /api/delivery — list deliveries
 router.get('/', authenticate, asyncHandler(async (req, res) => {
-  await ensureDeliveryAddress();
+  await ensureDeliverySchema();
   const { status, delivery_man_id, date, order_id } = req.query;
   const where = ['1=1'];
   const params = [];
@@ -38,9 +46,10 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 
   const deliveries = (await query(`
     SELECT d.*, o.invoice_number, o.customer_name, o.required_delivery_date,
-      u.name AS delivery_man_name
+      COALESCE(dl.name, u.name) AS delivery_man_name, dl.name AS deliverer_name
     FROM deliveries d
     JOIN orders o ON d.order_id = o.id
+    LEFT JOIN deliverers dl ON d.deliverer_id = dl.id
     LEFT JOIN users u ON d.delivery_man_id = u.id
     WHERE ${where.join(' AND ')}
     ORDER BY d.scheduled_date ASC, o.required_delivery_date ASC
@@ -52,30 +61,32 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/delivery — assign delivery
 router.post('/', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller'];
+  const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  await ensureDeliveryAddress();
+  await ensureDeliverySchema();
 
-  const { order_id, delivery_man_id, scheduled_date, address, notes } = req.body;
+  const { order_id, deliverer_id, scheduled_date, address, notes } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
 
   const order = (await query("SELECT id FROM orders WHERE id = $1 AND stage = 'ready_for_delivery'", [order_id])).rows[0];
   if (!order) return res.status(400).json({ error: 'Order not found or not ready for delivery' });
 
-  const id = uuidv4();
+  // A deliverer (if chosen) must be a real, active one. Deliverers don't log in.
+  if (deliverer_id) {
+    const dl = (await query('SELECT id, is_active FROM deliverers WHERE id = $1', [deliverer_id])).rows[0];
+    if (!dl || !dl.is_active) return res.status(400).json({ error: 'Deliverer must be active' });
+  }
 
+  const id = uuidv4();
   await withTransaction(async (q) => {
     await q(`
-      INSERT INTO deliveries (id, order_id, delivery_man_id, scheduled_date, address, notes)
+      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes)
       VALUES ($1, $2, $3, $4, $5, $6)
-    `, [id, order_id, delivery_man_id || null, scheduled_date || null, address || null, notes || null]);
+    `, [id, order_id, deliverer_id || null, scheduled_date || null, address || null, notes || null]);
 
-    if (delivery_man_id) {
-      await q(`
-        INSERT INTO notifications (id, user_id, type, title, message, order_id)
-        VALUES ($1, $2, 'pic_assigned', 'New Delivery Assigned', 'You have a new delivery scheduled', $3)
-      `, [uuidv4(), delivery_man_id, order_id]);
-    }
+    await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
+             VALUES ($1, $2, $3, 'delivery_scheduled', $4)`,
+      [uuidv4(), order_id, req.user.id, `Delivery scheduled${scheduled_date ? ' for ' + scheduled_date : ''}`]);
   });
 
   res.status(201).json({ id });
@@ -88,13 +99,9 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
   // Guard against double-completion (would write a duplicate delivered transition).
   if (delivery.status === 'delivered') return res.status(409).json({ error: 'This delivery is already completed' });
 
-  // Only delivery man or admin can mark delivered
+  // Boss, Ops, or the Delivery Coordinator may mark a delivery complete.
   const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  // A driver may only complete a delivery assigned to them; managers complete any.
-  if (req.user.role === 'delivery_team' && delivery.delivery_man_id !== req.user.id) {
-    return res.status(403).json({ error: 'You can only complete deliveries assigned to you' });
-  }
 
   let signatureFile = null;
   if (req.file) {
@@ -113,9 +120,49 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
 
     await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES ($1, $2, $3, $4, $5)',
       [uuidv4(), delivery.order_id, 'ready_for_delivery', 'delivered', req.user.id]);
+
+    // Audit log (was previously missing on delivery completion).
+    await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
+             VALUES ($1, $2, $3, 'delivery_completed', $4)`,
+      [uuidv4(), delivery.order_id, req.user.id, 'Marked delivered']);
   });
 
   res.json({ message: 'Marked as delivered' });
+}));
+
+// ─── Deliverers (no-login driver list, managed by Boss / Ops / Coordinator) ───
+const DELIVERER_MANAGERS = ['super_admin', 'operations_controller', 'delivery_team'];
+
+// GET /api/delivery/deliverers — list (any authenticated user who can reach Delivery)
+router.get('/deliverers', authenticate, asyncHandler(async (req, res) => {
+  await ensureDeliverySchema();
+  const rows = (await query('SELECT * FROM deliverers ORDER BY is_active DESC, name ASC')).rows;
+  res.json(rows);
+}));
+
+// POST /api/delivery/deliverers — add a deliverer
+router.post('/deliverers', authenticate, asyncHandler(async (req, res) => {
+  if (!DELIVERER_MANAGERS.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  await ensureDeliverySchema();
+  const { name, phone } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  const id = uuidv4();
+  await query('INSERT INTO deliverers (id, name, phone) VALUES ($1, $2, $3)', [id, name.trim(), phone || null]);
+  res.status(201).json({ id, name: name.trim(), phone: phone || null, is_active: true });
+}));
+
+// PATCH /api/delivery/deliverers/:id — rename / set phone / enable-disable
+router.patch('/deliverers/:id', authenticate, asyncHandler(async (req, res) => {
+  if (!DELIVERER_MANAGERS.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  await ensureDeliverySchema();
+  const sets = [], vals = [];
+  if (req.body.name !== undefined) sets.push(`name = $${vals.push(req.body.name)}`);
+  if (req.body.phone !== undefined) sets.push(`phone = $${vals.push(req.body.phone || null)}`);
+  if (req.body.is_active !== undefined) sets.push(`is_active = $${vals.push(!!req.body.is_active)}`);
+  if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+  const idIdx = vals.push(req.params.id);
+  await query(`UPDATE deliverers SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
+  res.json({ message: 'Deliverer updated' });
 }));
 
 module.exports = router;

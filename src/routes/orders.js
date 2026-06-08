@@ -4,7 +4,7 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
-const { authenticate, canMoveOrders } = require('../middleware/auth');
+const { authenticate, authorize, canMoveOrders } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const { uploadBuffer, publicUrl, removeObject } = require('../lib/supabaseClient');
 
@@ -34,11 +34,13 @@ function uploadSingle(field) {
 const VALID_STAGES = ['order', 'production', 'packing', 'ready_for_delivery', 'delivered', 'cancelled', 'on_hold'];
 // Forward workflow + which staff roles "own" (may complete) each stage.
 const FORWARD_STAGE = { order: 'production', production: 'packing', packing: 'ready_for_delivery', ready_for_delivery: 'delivered' };
-const STAGE_OWNERS = { production: ['production_staff'], packing: ['packing_staff'] };
+const STAGE_OWNERS = { production: ['production_staff', 'production_lead'], packing: ['packing_staff', 'production_lead'] };
 
 // Customer importance tiers — a per-order classification of how important the
 // customer is, separate from `priority` (which flags a rush order). Low → high.
 const VALID_IMPORTANCE = ['standard', 'priority', 'vip'];
+// Per-SKU completion is tracked by status only (replaces the old made_qty count).
+const VALID_ITEM_STATUS = ['not_started', 'in_progress', 'done'];
 // Production-floor roles must not see *who* the customer is; they get the
 // importance tier in its place. Ops/Admin and delivery_team keep the name.
 const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_staff'];
@@ -74,8 +76,9 @@ async function ensureItemColumns() {
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_at timestamptz');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_by uuid REFERENCES users(id)');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_qty integer NOT NULL DEFAULT 0');
-  // Backfill legacy fully-made rows so units-made matches the boolean.
-  await query('UPDATE order_items SET made_qty = quantity WHERE made = true AND made_qty = 0');
+  await query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'not_started'");
+  // Backfill status from the legacy made / made_qty fields (one-time; cheap no-op afterwards).
+  await query("UPDATE order_items SET status = CASE WHEN made THEN 'done' WHEN made_qty > 0 THEN 'in_progress' ELSE 'not_started' END WHERE status = 'not_started' AND (made = true OR made_qty > 0)");
   _itemColsReady = true;
 }
 
@@ -160,8 +163,6 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
-      (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE order_id = o.id) AS total_units,
-      (SELECT COALESCE(SUM(LEAST(made_qty, quantity)), 0)::int FROM order_items WHERE order_id = o.id) AS made_units,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND made) AS made_count,
       (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status
     FROM orders o
@@ -346,7 +347,10 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   if (!['super_admin', 'operations_controller'].includes(req.user.role)) {
     if (order.on_hold) return res.status(403).json({ error: 'Order is on hold' });
     const owners = STAGE_OWNERS[fromStage] || [];
-    if (!owners.includes(req.user.role) || to_stage !== FORWARD_STAGE[fromStage]) {
+    const forwardOk = owners.includes(req.user.role) && to_stage === FORWARD_STAGE[fromStage];
+    // Production Lead may send a packed order back to production for rework.
+    const reworkOk = req.user.role === 'production_lead' && fromStage === 'packing' && to_stage === 'production';
+    if (!forwardOk && !reworkOk) {
       return res.status(403).json({ error: 'You can only mark your own stage complete' });
     }
   }
@@ -410,7 +414,7 @@ router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (
 }));
 
 // PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags
-router.patch('/:id/flags', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_controller', 'production_lead'), asyncHandler(async (req, res) => {
   await ensureOrderFlags();
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -452,8 +456,9 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
   const b = req.body || {};
   const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
-  // `made` (bool, full toggle) and `made_qty` (int, partial completion) both report progress.
-  const progressing = b.made !== undefined || b.made_qty !== undefined;
+  // Items are tracked by status only: not_started → in_progress → done.
+  const progressing = b.status !== undefined;
+  if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
   if (editingFields && !isManager) return res.status(403).json({ error: 'Only Ops/Admin can edit item details' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
   // Stage staff may only record progress while the order sits in the stage they own.
@@ -474,29 +479,23 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   if (b.name !== undefined) sets.push(`name = $${vals.push(b.name)}`);
   if (b.unit !== undefined) sets.push(`unit = $${vals.push(b.unit)}`);
 
-  // Determine new made_qty: explicit partial value, full-toggle, or clamp on a quantity shrink.
-  let madeQty = null;
-  if (b.made_qty !== undefined) madeQty = Math.max(0, Math.min(Math.round(Number(b.made_qty) || 0), qty));
-  else if (b.made !== undefined) madeQty = b.made ? qty : 0;
-  else if (b.quantity !== undefined) madeQty = Math.min(Math.round(Number(item.made_qty) || 0), qty);
-
-  let made = item.made;
-  if (madeQty !== null) {
-    made = qty > 0 && madeQty >= qty;
-    sets.push(`made_qty = $${vals.push(madeQty)}`);
-    sets.push(`made = $${vals.push(made)}`);
-    sets.push(`made_at = $${vals.push(madeQty > 0 ? new Date().toISOString() : null)}`);
-    sets.push(`made_by = $${vals.push(madeQty > 0 ? req.user.id : null)}`);
+  if (progressing) {
+    const status = b.status;
+    // Keep the legacy `made` boolean in sync so board/floor "SKUs done" counts keep working.
+    sets.push(`status = $${vals.push(status)}`);
+    sets.push(`made = $${vals.push(status === 'done')}`);
+    sets.push(`made_at = $${vals.push(status === 'not_started' ? null : new Date().toISOString())}`);
+    sets.push(`made_by = $${vals.push(status === 'not_started' ? null : req.user.id)}`);
   }
   if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
 
   const idIdx = vals.push(req.params.itemId);
   await query(`UPDATE order_items SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
   let action = 'item_edited';
-  if (progressing) action = made ? 'item_made' : madeQty > 0 ? 'item_progress' : 'item_reopened';
+  if (progressing) action = b.status === 'done' ? 'item_made' : b.status === 'in_progress' ? 'item_progress' : 'item_reopened';
   await logActivity(query, {
     orderId: req.params.id, userId: req.user.id, action,
-    details: progressing ? `${item.sku} — ${item.name} (${madeQty}/${qty})` : `${item.sku} — ${item.name}`,
+    details: progressing ? `${item.sku} — ${item.name} (${b.status})` : `${item.sku} — ${item.name}`,
     ipAddress: req.ip || null,
   });
   res.json({ ok: true });

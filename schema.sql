@@ -21,7 +21,7 @@ create table if not exists users (
   email        text unique not null,
   password     text not null,
   role         text not null check (role in (
-    'super_admin','operations_controller','production_lead',
+    'super_admin','admin','operations_controller','production_lead',
     'production_staff','packing_staff','delivery_team'
   )),
   avatar_color text default '#3B82F6',
@@ -86,6 +86,7 @@ create table if not exists order_items (
   made_at    timestamptz,
   made_by    uuid references users(id),
   made_qty   integer not null default 0,
+  status     text not null default 'not_started' check (status in ('not_started','in_progress','done')),
   created_at timestamptz not null default now()
 );
 
@@ -161,10 +162,19 @@ create table if not exists notifications (
 -- ─────────────────────────────────────────
 -- DELIVERY
 -- ─────────────────────────────────────────
+create table if not exists deliverers (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  phone      text,
+  is_active  boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists deliveries (
   id              uuid primary key default gen_random_uuid(),
   order_id        uuid not null references orders(id) on delete cascade,
   delivery_man_id uuid references users(id),
+  deliverer_id    uuid references deliverers(id),
   scheduled_date  date,
   address         text,
   delivered_at    timestamptz,
