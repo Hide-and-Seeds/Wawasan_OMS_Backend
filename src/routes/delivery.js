@@ -26,6 +26,7 @@ async function ensureDeliverySchema() {
     created_at timestamptz not null default now()
   )`);
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliverer_id uuid REFERENCES deliverers(id)');
+  await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tracking_no text');
   _delSchemaReady = true;
 }
 
@@ -65,7 +66,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
-  const { order_id, deliverer_id, scheduled_date, address, notes } = req.body;
+  const { order_id, deliverer_id, scheduled_date, address, notes, tracking_no } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
 
   const order = (await query("SELECT id FROM orders WHERE id = $1 AND stage = 'ready_for_delivery'", [order_id])).rows[0];
@@ -80,9 +81,9 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   const id = uuidv4();
   await withTransaction(async (q) => {
     await q(`
-      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `, [id, order_id, deliverer_id || null, scheduled_date || null, address || null, notes || null]);
+      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes, tracking_no)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, [id, order_id, deliverer_id || null, scheduled_date || null, address || null, notes || null, tracking_no || null]);
 
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_scheduled', $4)`,

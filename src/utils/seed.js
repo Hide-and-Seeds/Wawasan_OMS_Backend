@@ -17,8 +17,8 @@ const users = [
   { name: 'Delivery Coordinator', email: 'dispatch@wawasancandle.com', role: 'delivery_team',          password: 'Dispatch@123', avatar_color: '#0EA5E9' },
 ];
 
-// No-login deliverers (drivers). Managed in-app under Delivery → Deliverers.
-const deliverers = ['Raju', 'Ahmad', 'Lim Wei'];
+// No-login couriers (delivery providers). Managed in-app under Delivery → Couriers.
+const deliverers = ['Lazada (LEX)', 'Shopee (SPX)', 'J&T Express', 'Ninja Van', 'Pos Laju', 'City-Link', 'GDex', 'Flash Express', 'DHL', 'Own Driver'];
 
 const defaultSettings = [
   ['stage_order_name', 'Order'],

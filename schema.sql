@@ -177,6 +177,7 @@ create table if not exists deliveries (
   deliverer_id    uuid references deliverers(id),
   scheduled_date  date,
   address         text,
+  tracking_no     text,
   delivered_at    timestamptz,
   signature_file  text,                 -- storage object path in the Supabase bucket
   status          text not null default 'pending' check (status in (
