@@ -12,13 +12,18 @@ const { getPool, query } = require('./db');
 // `npm run reset-passwords` (see src/utils/reset-passwords.js).
 const SHARED_PASSWORD = 'wawasan123';
 const users = [
-  { name: 'Boss',                 email: 'admin@wawasancandle.com',    role: 'super_admin',           password: SHARED_PASSWORD, avatar_color: '#7C3AED' },
-  { name: 'Office Admin',         email: 'office@wawasancandle.com',   role: 'admin',                 password: SHARED_PASSWORD, avatar_color: '#9333EA' },
-  { name: 'Reenee',               email: 'reenee@wawasancandle.com',   role: 'operations_controller', password: SHARED_PASSWORD, avatar_color: '#0891B2' },
-  { name: 'Misha',                email: 'misha@wawasancandle.com',    role: 'production_lead',        password: SHARED_PASSWORD, avatar_color: '#059669' },
-  { name: 'Staff Ali',            email: 'ali@wawasancandle.com',      role: 'production_staff',       password: SHARED_PASSWORD, avatar_color: '#D97706' },
-  { name: 'Staff Siti',           email: 'siti@wawasancandle.com',     role: 'packing_staff',          password: SHARED_PASSWORD, avatar_color: '#DB2777' },
-  { name: 'Delivery Coordinator', email: 'dispatch@wawasancandle.com', role: 'delivery_team',          password: SHARED_PASSWORD, avatar_color: '#0EA5E9' },
+  // Full-role (Boss-tier) accounts — can do everything. admin@ is also the system
+  // user the SQL Account webhook attributes imported orders to; keep it.
+  { name: 'Boss',                 email: 'admin@wawasancandle.com',    role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#7C3AED' },
+  { name: 'Amy',                  email: 'amy@wawasancandle.com',      role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#E11D48' },
+  { name: 'Vincent',              email: 'vincent@wawasancandle.com',  role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#2563EB' },
+  { name: 'Ying Fei',             email: 'yingfei@wawasancandle.com',  role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#CA8A04' },
+  // Back-office Admin (user mgmt, audit, settings, notifications, assign driver, item amend).
+  { name: 'Misha',                email: 'misha@wawasancandle.com',    role: 'admin',           password: SHARED_PASSWORD, avatar_color: '#059669' },
+  // Production Head — runs the production + packing floor.
+  { name: 'Reenee',               email: 'reenee@wawasancandle.com',   role: 'production_lead', password: SHARED_PASSWORD, avatar_color: '#0891B2' },
+  { name: 'Staff Siti',           email: 'siti@wawasancandle.com',     role: 'packing_staff',   password: SHARED_PASSWORD, avatar_color: '#DB2777' },
+  { name: 'Delivery Coordinator', email: 'dispatch@wawasancandle.com', role: 'delivery_team',   password: SHARED_PASSWORD, avatar_color: '#0EA5E9' },
 ];
 
 // No-login couriers (delivery providers). Managed in-app under Delivery → Couriers.

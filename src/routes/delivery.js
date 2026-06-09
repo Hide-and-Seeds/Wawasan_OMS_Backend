@@ -62,7 +62,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/delivery — assign delivery
 router.post('/', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
+  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
@@ -101,7 +101,7 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
   if (delivery.status === 'delivered') return res.status(409).json({ error: 'This delivery is already completed' });
 
   // Boss, Ops, or the Delivery Coordinator may mark a delivery complete.
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
+  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
 
   let signatureFile = null;
@@ -133,7 +133,7 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
 
 // PATCH /api/delivery/:id — update a scheduled delivery, or cancel it (status: 'failed')
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
+  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
@@ -174,7 +174,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── Deliverers (no-login driver list, managed by Boss / Ops / Coordinator) ───
-const DELIVERER_MANAGERS = ['super_admin', 'operations_controller', 'delivery_team'];
+const DELIVERER_MANAGERS = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
 
 // GET /api/delivery/deliverers — list (any authenticated user who can reach Delivery)
 router.get('/deliverers', authenticate, asyncHandler(async (req, res) => {

@@ -415,6 +415,18 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
         orderId: order.id
       });
     }
+
+    // Back-office Admins track every stage change (skip the actor and the PIC, already notified).
+    const admins = (await q("SELECT id FROM users WHERE role = 'admin' AND is_active = true")).rows;
+    for (const a of admins) {
+      if (a.id === req.user.id || a.id === order.pic_id) continue;
+      await notify(q, {
+        userId: a.id, type: 'order_stage_entered',
+        title: `Order ${order.invoice_number} → ${to_stage}`,
+        message: `Moved by ${req.user.name}`,
+        orderId: order.id
+      });
+    }
   });
 
   res.json({ message: 'Order moved', from: fromStage, to: to_stage });
@@ -686,8 +698,8 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
     await logActivity(q, { orderId, userId: systemUser.id, action: 'order_created',
       details: `Order ${invoice_number} imported from SQL Account`, newValue: initialStage, ipAddress: req.ip });
 
-    // Tell Operations + Admin a new invoice arrived so they route it (assign PIC, set priority).
-    const routers = (await q("SELECT id FROM users WHERE role IN ('operations_controller','super_admin') AND is_active = true")).rows;
+    // Tell Operations, Boss and back-office Admin a new invoice arrived so they route it (assign PIC, set priority).
+    const routers = (await q("SELECT id FROM users WHERE role IN ('operations_controller','super_admin','admin') AND is_active = true")).rows;
     for (const u of routers) {
       await notify(q, { userId: u.id, type: 'order_stage_entered',
         title: 'New invoice from SQL Account',
