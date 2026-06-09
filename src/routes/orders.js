@@ -459,7 +459,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   // Items are tracked by status only: not_started → in_progress → done.
   const progressing = b.status !== undefined;
   if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
-  if (editingFields && !isManager) return res.status(403).json({ error: 'Only Ops/Admin can edit item details' });
+  if (editingFields) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct SKUs/quantities in SQL Account.' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
   // Stage staff may only record progress while the order sits in the stage they own.
   if (progressing && !isManager) {
@@ -503,26 +503,14 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
 
 // POST /api/orders/:id/items — add a line item (Ops/Admin)
 router.post('/:id/items', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
-  const order = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
-  if (!order) return res.status(404).json({ error: 'Order not found' });
-  const { sku, name, quantity, unit } = req.body;
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  const id = uuidv4();
-  await query(
-    'INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
-    [id, req.params.id, sku || 'N/A', name, Number(quantity) || 1, unit || 'pcs']
-  );
-  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'item_added', details: `${sku || ''} ${name}`.trim(), ipAddress: req.ip || null });
-  res.status(201).json({ id });
+  // Line items are locked after an order is placed — they must match the source invoice.
+  return res.status(403).json({ error: 'Line items are locked once an order is placed and cannot be added. Add items in SQL Account.' });
 }));
 
 // DELETE /api/orders/:id/items/:itemId — remove a line item (Ops/Admin)
 router.delete('/:id/items/:itemId', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
-  const item = (await query('SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [req.params.itemId, req.params.id])).rows[0];
-  if (!item) return res.status(404).json({ error: 'Item not found' });
-  await query('DELETE FROM order_items WHERE id = $1', [req.params.itemId]);
-  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'item_removed', details: `${item.sku} — ${item.name}`, ipAddress: req.ip || null });
-  res.json({ ok: true });
+  // Line items are locked after an order is placed — they must match the source invoice.
+  return res.status(403).json({ error: 'Line items are locked once an order is placed and cannot be removed. Remove items in SQL Account.' });
 }));
 
 // POST /api/orders/:id/attachments
