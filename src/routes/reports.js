@@ -122,8 +122,18 @@ router.get('/production', authenticate, authorize(...PROD_REPORT_ROLES), asyncHa
     ORDER BY date ASC
   `)).rows;
 
+  // Units (SKU lines) finished in the period + how many orders sit in production right now.
+  const itemFilter = dateFilter.replace(/st\.created_at/g, 'oi.made_at');
+  const unitsMade = (await query(`
+    SELECT COUNT(*)::int AS count FROM order_items oi
+    WHERE oi.status = 'done' AND oi.made_at IS NOT NULL ${itemFilter}
+  `, params)).rows[0];
+  const inStage = (await query("SELECT COUNT(*)::int AS count FROM orders WHERE stage = 'production'")).rows[0];
+
   res.json({
     completed: completedProduction.count,
+    units_made: unitsMade.count,
+    in_stage: inStage.count,
     rework_count: reworks.count,
     rework_rate: completedProduction.count > 0
       ? ((reworks.count / completedProduction.count) * 100).toFixed(1)
@@ -165,8 +175,11 @@ router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandl
     ${dateFilter}
   `)).rows[0];
 
+  const inStage = (await query("SELECT COUNT(*)::int AS count FROM orders WHERE stage = 'packing'")).rows[0];
+
   res.json({
     packed: packed.count,
+    in_stage: inStage.count,
     rework_count: reworks.count,
     rework_rate: packed.count > 0 ? ((reworks.count / packed.count) * 100).toFixed(1) : 0,
     avg_pack_minutes: avgPackTime.avg_minutes != null ? Number(avgPackTime.avg_minutes).toFixed(0) : null
@@ -207,10 +220,16 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     GROUP BY COALESCE(dl.id, u.id), COALESCE(dl.name, u.name) ORDER BY total DESC
   `)).rows;
 
+  // Live snapshot, not period-bound: deliveries still out, and ones that failed.
+  const pending = (await query("SELECT COUNT(*)::int AS count FROM deliveries WHERE status IN ('pending','in_transit')")).rows[0];
+  const failed = (await query("SELECT COUNT(*)::int AS count FROM deliveries WHERE status = 'failed'")).rows[0];
+
   res.json({
     total_deliveries: totalDeliveries.count,
     on_time_count: onTime.on_time || 0,
     on_time_rate: onTime.total > 0 ? ((onTime.on_time / onTime.total) * 100).toFixed(1) : 0,
+    pending_count: pending.count,
+    failed_count: failed.count,
     by_delivery_man: byDeliveryMan
   });
 }));
