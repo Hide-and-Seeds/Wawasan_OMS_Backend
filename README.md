@@ -157,7 +157,9 @@ date + `SQL_ACCOUNT_DEFAULT_LEAD_DAYS`. Money is not sent (it stays in SQL Accou
 ```
 
 **Full contract, response codes, a test command, and SQL-Account-side wiring
-options are in [`SQL-ACCOUNT-WEBHOOK.md`](./SQL-ACCOUNT-WEBHOOK.md).**
+options are in [`SQL-ACCOUNT-WEBHOOK.md`](./SQL-ACCOUNT-WEBHOOK.md).** Developer
+notes — the order-creation parity rule, the product/SKU data model, demo seeding,
+and the deploy/verify loop — are in [`INTEGRATION-NOTES.md`](./INTEGRATION-NOTES.md).
 
 ## Deployment (Supabase + Vercel)
 
