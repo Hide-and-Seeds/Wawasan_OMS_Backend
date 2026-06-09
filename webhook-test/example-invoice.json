@@ -1,0 +1,12 @@
+{
+  "invoice_number": "TEST-0001",
+  "customer_name": "Test Customer Sdn Bhd",
+  "order_date": "2026-06-09",
+  "po_ref": "TEST-PO",
+  "payment_terms": "C.O.D.",
+  "notes": "Manual webhook test - safe to delete",
+  "items": [
+    { "sku": "STK006", "name": "FIRE CHICKEN FIRESTARTER (40 BIJI) - 72 BOX/CTN", "quantity": 10, "unit": "CTN" },
+    { "sku": "STK035", "name": "SERAI LILIN ANTI INSECTS CANDLES - 2PCS/PACK (66 PACKS/CTN)", "quantity": 2, "unit": "CTN" }
+  ]
+}

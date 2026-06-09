@@ -1,0 +1,3 @@
+# Local-only: holds the webhook secret. Never commit.
+webhook-test.env
+state.json

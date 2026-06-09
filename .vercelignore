@@ -7,4 +7,5 @@ uploads/
 .env.local
 wa-worker/
 sql-account-bridge/
+webhook-test/
 demo-seed.sql
