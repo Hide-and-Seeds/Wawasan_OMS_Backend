@@ -6,4 +6,5 @@ uploads/
 .env
 .env.local
 wa-worker/
+sql-account-bridge/
 demo-seed.sql
