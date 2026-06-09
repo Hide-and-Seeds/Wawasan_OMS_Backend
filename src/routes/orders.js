@@ -431,16 +431,19 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
       });
     }
 
-    // Back-office Admins track every stage change (skip the actor and the PIC, already notified).
-    const admins = (await q("SELECT id FROM users WHERE role = 'admin' AND is_active = true")).rows;
-    for (const a of admins) {
-      if (a.id === req.user.id || a.id === order.pic_id) continue;
-      await notify(q, {
-        userId: a.id, type: 'order_stage_entered',
-        title: `Order ${order.invoice_number} → ${to_stage}`,
-        message: `Moved by ${req.user.name}`,
-        orderId: order.id
-      });
+    // Back-office Admins get ONE high-signal ping — when an order becomes ready to ship —
+    // not on every intermediate production/packing move (that flooded the bell).
+    if (to_stage === 'ready_for_delivery') {
+      const admins = (await q("SELECT id FROM users WHERE role = 'admin' AND is_active = true")).rows;
+      for (const a of admins) {
+        if (a.id === req.user.id || a.id === order.pic_id) continue;
+        await notify(q, {
+          userId: a.id, type: 'order_stage_entered',
+          title: `Order ${order.invoice_number} is ready for delivery`,
+          message: `Moved by ${req.user.name}`,
+          orderId: order.id
+        });
+      }
     }
   });
 
