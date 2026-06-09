@@ -131,6 +131,48 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
   res.json({ message: 'Marked as delivered' });
 }));
 
+// PATCH /api/delivery/:id — update a scheduled delivery, or cancel it (status: 'failed')
+router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
+  const allowed = ['super_admin', 'operations_controller', 'delivery_team'];
+  if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  await ensureDeliverySchema();
+
+  const delivery = (await query('SELECT * FROM deliveries WHERE id = $1', [req.params.id])).rows[0];
+  if (!delivery) return res.status(404).json({ error: 'Delivery not found' });
+  if (delivery.status === 'delivered') return res.status(409).json({ error: 'A completed delivery cannot be changed' });
+
+  const { deliverer_id, scheduled_date, address, notes, tracking_no, status } = req.body;
+  if (deliverer_id) {
+    const dl = (await query('SELECT id, is_active FROM deliverers WHERE id = $1', [deliverer_id])).rows[0];
+    if (!dl || !dl.is_active) return res.status(400).json({ error: 'Deliverer must be active' });
+  }
+  if (status !== undefined && !['pending', 'in_transit', 'failed'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+
+  const sets = [], vals = [];
+  if (deliverer_id !== undefined) sets.push(`deliverer_id = $${vals.push(deliverer_id || null)}`);
+  if (scheduled_date !== undefined) sets.push(`scheduled_date = $${vals.push(scheduled_date || null)}`);
+  if (address !== undefined) sets.push(`address = $${vals.push(address || null)}`);
+  if (notes !== undefined) sets.push(`notes = $${vals.push(notes || null)}`);
+  if (tracking_no !== undefined) sets.push(`tracking_no = $${vals.push(tracking_no || null)}`);
+  if (status !== undefined) sets.push(`status = $${vals.push(status)}`);
+  if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+  sets.push('updated_at = now()');
+
+  const idIdx = vals.push(req.params.id);
+  await withTransaction(async (q) => {
+    await q(`UPDATE deliveries SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
+    await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
+             VALUES ($1, $2, $3, $4, $5)`,
+      [uuidv4(), delivery.order_id, req.user.id,
+       status === 'failed' ? 'delivery_cancelled' : 'delivery_updated',
+       status === 'failed' ? 'Delivery cancelled — order returned to Ready for Delivery' : 'Delivery details updated']);
+  });
+
+  res.json({ message: 'Delivery updated' });
+}));
+
 // ─── Deliverers (no-login driver list, managed by Boss / Ops / Coordinator) ───
 const DELIVERER_MANAGERS = ['super_admin', 'operations_controller', 'delivery_team'];
 
