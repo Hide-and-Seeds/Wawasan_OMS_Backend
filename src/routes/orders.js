@@ -474,7 +474,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   // Items are tracked by status only: not_started → in_progress → done.
   const progressing = b.status !== undefined;
   if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
-  if (editingFields) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct SKUs/quantities in SQL Account.' });
+  if (editingFields) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct STKs/quantities in SQL Account.' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
   // Stage staff may only record progress while the order sits in the stage they own.
   if (progressing && !isManager) {

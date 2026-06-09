@@ -34,7 +34,7 @@ async function orderConfirmationMedia(orderId) {
   y -= 16; draw(`Expected delivery: ${order.required_delivery_date || '-'}`, L, 11);
   y -= 30;
 
-  draw('SKU', L, 10, bold, grey); draw('Product', L + 110, 10, bold, grey); draw('Qty', 458, 10, bold, grey); draw('Unit', 510, 10, bold, grey);
+  draw('STK', L, 10, bold, grey); draw('Product', L + 110, 10, bold, grey); draw('Qty', 458, 10, bold, grey); draw('Unit', 510, 10, bold, grey);
   y -= 8; page.drawLine({ start: { x: L, y }, end: { x: R, y }, thickness: 0.6, color: grey }); y -= 16;
   for (const it of items) {
     if (y < 96) break;
