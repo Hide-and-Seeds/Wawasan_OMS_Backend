@@ -7,14 +7,18 @@ const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 const { getPool, query } = require('./db');
 
+// Boss request: every account uses ONE shared password. Trade-off: the login no
+// longer proves who someone is. Change it for all users at once with
+// `npm run reset-passwords` (see src/utils/reset-passwords.js).
+const SHARED_PASSWORD = 'wawasan123';
 const users = [
-  { name: 'Boss',                 email: 'admin@wawasancandle.com',    role: 'super_admin',           password: 'Admin@123',    avatar_color: '#7C3AED' },
-  { name: 'Office Admin',         email: 'office@wawasancandle.com',   role: 'admin',                 password: 'Office@123',   avatar_color: '#9333EA' },
-  { name: 'Reenee',               email: 'reenee@wawasancandle.com',   role: 'operations_controller', password: 'Reenee@123',   avatar_color: '#0891B2' },
-  { name: 'Misha',                email: 'misha@wawasancandle.com',    role: 'production_lead',        password: 'Misha@123',    avatar_color: '#059669' },
-  { name: 'Staff Ali',            email: 'ali@wawasancandle.com',      role: 'production_staff',       password: 'Staff@123',    avatar_color: '#D97706' },
-  { name: 'Staff Siti',           email: 'siti@wawasancandle.com',     role: 'packing_staff',          password: 'Staff@123',    avatar_color: '#DB2777' },
-  { name: 'Delivery Coordinator', email: 'dispatch@wawasancandle.com', role: 'delivery_team',          password: 'Dispatch@123', avatar_color: '#0EA5E9' },
+  { name: 'Boss',                 email: 'admin@wawasancandle.com',    role: 'super_admin',           password: SHARED_PASSWORD, avatar_color: '#7C3AED' },
+  { name: 'Office Admin',         email: 'office@wawasancandle.com',   role: 'admin',                 password: SHARED_PASSWORD, avatar_color: '#9333EA' },
+  { name: 'Reenee',               email: 'reenee@wawasancandle.com',   role: 'operations_controller', password: SHARED_PASSWORD, avatar_color: '#0891B2' },
+  { name: 'Misha',                email: 'misha@wawasancandle.com',    role: 'production_lead',        password: SHARED_PASSWORD, avatar_color: '#059669' },
+  { name: 'Staff Ali',            email: 'ali@wawasancandle.com',      role: 'production_staff',       password: SHARED_PASSWORD, avatar_color: '#D97706' },
+  { name: 'Staff Siti',           email: 'siti@wawasancandle.com',     role: 'packing_staff',          password: SHARED_PASSWORD, avatar_color: '#DB2777' },
+  { name: 'Delivery Coordinator', email: 'dispatch@wawasancandle.com', role: 'delivery_team',          password: SHARED_PASSWORD, avatar_color: '#0EA5E9' },
 ];
 
 // No-login couriers (delivery providers). Managed in-app under Delivery → Couriers.

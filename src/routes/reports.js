@@ -286,6 +286,106 @@ router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asyn
   res.json({ orders: out });
 }));
 
+// Forward (completing) stage moves — used to credit a person with finishing a step.
+const FORWARD_PAIRS = `(st.from_stage, st.to_stage) IN
+  (('order','production'),('production','packing'),
+   ('packing','ready_for_delivery'),('ready_for_delivery','delivered'))`;
+
+// GET /api/reports/staff — per-person productivity: stage completions, items
+// marked done, and reworks, in the chosen period. Boss/Ops only (names individuals).
+router.get('/staff', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  const { period = 'weekly', from, to } = req.query;
+  const params = [];
+  // Matching date windows for stage_transitions (created_at) and order_items (made_at).
+  let stF, itF;
+  if (from && to) {
+    params.push(from, to);
+    stF = 'AND st.created_at BETWEEN $1 AND $2';
+    itF = 'AND oi.made_at BETWEEN $1 AND $2';
+  } else if (period === 'daily') {
+    stF = 'AND st.created_at::date = CURRENT_DATE';
+    itF = 'AND oi.made_at::date = CURRENT_DATE';
+  } else if (period === 'monthly') {
+    stF = "AND date_trunc('month', st.created_at) = date_trunc('month', now())";
+    itF = "AND date_trunc('month', oi.made_at) = date_trunc('month', now())";
+  } else { // weekly (default)
+    stF = "AND date_trunc('week', st.created_at) = date_trunc('week', now())";
+    itF = "AND date_trunc('week', oi.made_at) = date_trunc('week', now())";
+  }
+
+  const staff = (await query(`
+    WITH trans AS (
+      SELECT st.transitioned_by AS uid,
+        SUM(CASE WHEN ${FORWARD_PAIRS} THEN 1 ELSE 0 END)::int AS completions,
+        SUM(CASE WHEN st.from_stage = 'packing' AND st.to_stage = 'production' THEN 1 ELSE 0 END)::int AS reworks
+      FROM stage_transitions st
+      WHERE st.transitioned_by IS NOT NULL ${stF}
+      GROUP BY st.transitioned_by
+    ),
+    items AS (
+      SELECT oi.made_by AS uid, COUNT(*)::int AS items_done
+      FROM order_items oi
+      WHERE oi.status = 'done' AND oi.made_by IS NOT NULL ${itF}
+      GROUP BY oi.made_by
+    )
+    SELECT u.id, u.name, u.role, u.avatar_color,
+      COALESCE(t.completions, 0) AS completions,
+      COALESCE(t.reworks, 0) AS reworks,
+      COALESCE(i.items_done, 0) AS items_done
+    FROM users u
+    LEFT JOIN trans t ON t.uid = u.id
+    LEFT JOIN items i ON i.uid = u.id
+    WHERE COALESCE(t.completions, 0) + COALESCE(t.reworks, 0) + COALESCE(i.items_done, 0) > 0
+    ORDER BY completions DESC, items_done DESC, u.name ASC
+  `, params)).rows;
+
+  res.json({ staff });
+}));
+
+// GET /api/reports/pic — per-person-in-charge view: current open workload
+// (active / overdue / on-hold, live) plus orders completed in the period. Boss/Ops only.
+router.get('/pic', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  const { period = 'weekly', from, to } = req.query;
+  const params = [];
+  let stF;
+  if (from && to) { params.push(from, to); stF = 'AND st.created_at BETWEEN $1 AND $2'; }
+  else if (period === 'daily') stF = 'AND st.created_at::date = CURRENT_DATE';
+  else if (period === 'monthly') stF = "AND date_trunc('month', st.created_at) = date_trunc('month', now())";
+  else stF = "AND date_trunc('week', st.created_at) = date_trunc('week', now())";
+
+  // Roles that can hold orders as PIC — keeps zero-load assignees visible in the table.
+  const picRoles = ['operations_controller', 'production_lead', 'production_staff', 'packing_staff', 'delivery_team'];
+
+  const pics = (await query(`
+    WITH wl AS (
+      SELECT pic_id AS uid,
+        COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled'))::int AS active,
+        COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND required_delivery_date < CURRENT_DATE)::int AS overdue,
+        COUNT(*) FILTER (WHERE on_hold)::int AS on_hold
+      FROM orders WHERE pic_id IS NOT NULL GROUP BY pic_id
+    ),
+    done AS (
+      SELECT st.transitioned_by AS uid, COUNT(*)::int AS completed
+      FROM stage_transitions st
+      WHERE st.transitioned_by IS NOT NULL AND ${FORWARD_PAIRS} ${stF}
+      GROUP BY st.transitioned_by
+    )
+    SELECT u.id, u.name, u.role, u.avatar_color,
+      COALESCE(w.active, 0) AS active,
+      COALESCE(w.overdue, 0) AS overdue,
+      COALESCE(w.on_hold, 0) AS on_hold,
+      COALESCE(d.completed, 0) AS completed
+    FROM users u
+    LEFT JOIN wl w ON w.uid = u.id
+    LEFT JOIN done d ON d.uid = u.id
+    WHERE u.is_active = true
+      AND (COALESCE(w.active, 0) > 0 OR COALESCE(d.completed, 0) > 0 OR u.role = ANY($${params.push(picRoles)}::text[]))
+    ORDER BY active DESC, completed DESC, u.name ASC
+  `, params)).rows;
+
+  res.json({ pics });
+}));
+
 // GET /api/reports/audit — audit trail (admin only)
 router.get('/audit', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
   const { user_id, action, from, to, page = 1, limit = 50 } = req.query;
