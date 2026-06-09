@@ -28,10 +28,10 @@ function toMsisdn(phone) {
 }
 
 // Send one message. Returns { ok, providerMessageId?, error? }.
-async function sendMessage(to, text) {
+async function sendMessage(to, text, media) {
   if (!WORKER_URL) {
     // LOG provider — safe default for testing. Accepts any recipient.
-    console.log(`[whatsapp:log] -> ${to}: ${String(text).replace(/\s+/g, ' ').slice(0, 140)}`);
+    console.log(`[whatsapp:log] -> ${to}: ${String(text).replace(/\s+/g, ' ').slice(0, 140)}${media ? ' (+PDF ' + media.filename + ')' : ''}`);
     return { ok: true, providerMessageId: 'log-' + Date.now() };
   }
   const digits = String(to || '').replace(/[^\d]/g, '');
@@ -40,8 +40,8 @@ async function sendMessage(to, text) {
     const res = await fetch(`${WORKER_URL}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${WORKER_SECRET}` },
-      body: JSON.stringify({ to: digits, text: String(text) }),
-      signal: AbortSignal.timeout(20000),
+      body: JSON.stringify({ to: digits, text: String(text), media: media || undefined }),
+      signal: AbortSignal.timeout(30000),
     });
     const body = await res.json().catch(() => ({}));
     if (res.ok && body.status === 'sent') return { ok: true, providerMessageId: body.providerMessageId };

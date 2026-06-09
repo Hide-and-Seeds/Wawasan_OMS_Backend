@@ -13,7 +13,7 @@ import qrcode from "qrcode-terminal";
 import QR from "qrcode";
 import pkg from "whatsapp-web.js";
 
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 
 // pm2/systemd don't inherit the shell's env — load .env ourselves.
 try { process.loadEnvFile(); } catch { /* rely on the real environment */ }
@@ -69,7 +69,7 @@ app.use((req, res, next) => {
 });
 app.get("/health", (_req, res) => res.json({ ready }));
 
-async function sendWithRetry(to, text) {
+async function sendWithRetry(to, text, media) {
   const digits = String(to).replace(/[^\d]/g, "");
   if (!digits) return { error: "invalid number" };
   const transient = /Execution context was destroyed|Protocol error|Target closed|Session closed/i;
@@ -78,7 +78,12 @@ async function sendWithRetry(to, text) {
     try {
       const numberId = await client.getNumberId(digits);
       if (!numberId) return { notOnWhatsapp: true };
-      const msg = await client.sendMessage(numberId._serialized, String(text));
+      const payload = (media && media.data)
+        ? new MessageMedia(media.mimetype || "application/pdf", media.data, media.filename || "document.pdf")
+        : null;
+      const msg = payload
+        ? await client.sendMessage(numberId._serialized, payload, { caption: String(text || "") })
+        : await client.sendMessage(numberId._serialized, String(text));
       return { providerMessageId: msg?.id?._serialized };
     } catch (e) {
       lastErr = e;
@@ -91,10 +96,10 @@ async function sendWithRetry(to, text) {
 
 app.post("/send", async (req, res) => {
   if (!ready) return res.status(503).json({ status: "failed", error: "client not ready (scan QR / still booting)" });
-  const { to, text } = req.body || {};
+  const { to, text, media } = req.body || {};
   if (!to || !text) return res.status(400).json({ status: "failed", error: "missing 'to' or 'text'" });
   try {
-    const r = await sendWithRetry(to, text);
+    const r = await sendWithRetry(to, text, media);
     if (r.error) return res.status(400).json({ status: "failed", error: r.error });
     if (r.notOnWhatsapp) return res.status(422).json({ status: "failed", error: "number not on WhatsApp" });
     return res.json({ status: "sent", providerMessageId: r.providerMessageId });
@@ -127,7 +132,7 @@ async function dripTick() {
       const m = (await res.json().catch(() => ({}))).message;
       if (m && m.id) {
         try {
-          const r = await sendWithRetry(m.to, m.text);
+          const r = await sendWithRetry(m.to, m.text, m.media);
           if (r.notOnWhatsapp) await reportResult(m.id, "failed", "number not on WhatsApp");
           else if (r.error)    await reportResult(m.id, "failed", r.error);
           else { await reportResult(m.id, "sent"); console.log("drip: sent", m.id); }

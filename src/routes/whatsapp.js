@@ -9,6 +9,7 @@ const { query } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendMessage, providerName, toMsisdn, POLICY, withinWindow, localDate } = require('../lib/whatsapp');
+const { orderConfirmationMedia } = require('../lib/orderPdf');
 
 const ADMIN_ROLES = ['super_admin', 'operations_controller'];
 const BRAND = 'Wawasan Candle';
@@ -152,11 +153,20 @@ cronRoute('/morning-brief', asyncHandler(async (req, res) => {
   res.json({ ok: true, queued_id: r.rows[0].id, recipient: to, due_today: dueToday.length, overdue: overdue.length, body });
 }));
 
+// The order-confirmation PDF rides along with the 'received' message only.
+async function mediaForRow(row) {
+  if (row && row.kind === 'received' && row.order_id) {
+    try { return await orderConfirmationMedia(row.order_id); } catch (e) { return null; }
+  }
+  return null;
+}
+
 // Shared send step used by the test drip (claims a row, sends, records result).
 async function sendOne(m) {
   const claim = await query(`UPDATE message_queue SET status='sending', attempts=attempts+1 WHERE id=$1 AND status='queued'`, [m.id]);
   if (claim.rowCount === 0) return null; // raced
-  const r = await sendMessage(m.recipient, m.body);
+  const media = await mediaForRow(m);
+  const r = await sendMessage(m.recipient, m.body, media);
   if (r.ok) {
     await query(`UPDATE message_queue SET status='sent', sent_at=now(), provider=$2, error=NULL WHERE id=$1`, [m.id, providerName()]);
     return 'sent';
@@ -177,7 +187,7 @@ cronRoute('/drip', asyncHandler(async (req, res) => {
     const sentToday = (await query(`SELECT COUNT(*)::int c FROM message_queue WHERE status='sent' AND sent_at::date = CURRENT_DATE`)).rows[0].c;
     if (sentToday >= POLICY.dailyCap) return res.json({ sent: 0, failed: 0, skipped: 'daily-cap', provider: providerName() });
   }
-  const rows = (await query(`SELECT id, recipient, body, attempts FROM message_queue WHERE status='queued' ORDER BY created_at ASC LIMIT $1`, [max])).rows;
+  const rows = (await query(`SELECT id, recipient, body, attempts, kind, order_id FROM message_queue WHERE status='queued' ORDER BY created_at ASC LIMIT $1`, [max])).rows;
   let sent = 0, failed = 0;
   for (const m of rows) { const r = await sendOne(m); if (r === 'sent') sent++; else if (r === 'failed') failed++; }
   res.json({ ok: true, sent, failed, provider: providerName() });
@@ -228,6 +238,16 @@ router.post('/redirect', authenticate, authorize(...ADMIN_ROLES), asyncHandler(a
   res.json({ ok: true, updated: r.rowCount, recipient });
 }));
 
+// GET /api/whatsapp/order-pdf/:orderId — preview the customer order-confirmation
+// PDF (admin). This is the exact file attached to the 'received' WhatsApp message.
+router.get('/order-pdf/:orderId', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  const media = await orderConfirmationMedia(req.params.orderId).catch(() => null);
+  if (!media) return res.status(404).json({ error: 'Order not found or PDF unavailable' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${media.filename}"`);
+  res.send(Buffer.from(media.data, 'base64'));
+}));
+
 // ── always-on worker drip (production path; matches the wa-worker loop) ──────
 // GET /api/whatsapp/worker/next — claim one queued message to send.
 router.get('/worker/next', workerAuth, asyncHandler(async (req, res) => {
@@ -235,11 +255,12 @@ router.get('/worker/next', workerAuth, asyncHandler(async (req, res) => {
   if (!withinWindow()) return res.json({ message: null, reason: 'outside-window' });
   const sentToday = (await query(`SELECT COUNT(*)::int c FROM message_queue WHERE status='sent' AND sent_at::date = CURRENT_DATE`)).rows[0].c;
   if (sentToday >= POLICY.dailyCap) return res.json({ message: null, reason: 'daily-cap' });
-  const row = (await query(`SELECT id, recipient, body FROM message_queue WHERE status='queued' ORDER BY random() LIMIT 1`)).rows[0];
+  const row = (await query(`SELECT id, recipient, body, kind, order_id FROM message_queue WHERE status='queued' ORDER BY random() LIMIT 1`)).rows[0];
   if (!row) return res.json({ message: null, reason: 'empty' });
   const claim = await query(`UPDATE message_queue SET status='sending', attempts=attempts+1 WHERE id=$1 AND status='queued'`, [row.id]);
   if (claim.rowCount === 0) return res.json({ message: null, reason: 'raced' });
-  res.json({ message: { id: row.id, to: row.recipient, text: row.body } });
+  const media = await mediaForRow(row);
+  res.json({ message: { id: row.id, to: row.recipient, text: row.body, media } });
 }));
 
 // POST /api/whatsapp/worker/result — worker reports send outcome.
