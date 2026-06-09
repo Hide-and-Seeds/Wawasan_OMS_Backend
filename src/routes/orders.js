@@ -209,6 +209,20 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
   res.json({ active, completed_today: completedToday, overdue });
 }));
 
+// GET /api/orders/skus — distinct STK catalogue from existing order items, for
+// autofill when creating a manual order. Self-populating (every SQL Account
+// import + manual order grows it); sku/name/unit only, no money. Must stay
+// ABOVE GET /:id so "skus" isn't swallowed as an :id.
+router.get('/skus', authenticate, asyncHandler(async (req, res) => {
+  const rows = (await query(`
+    SELECT DISTINCT ON (sku) sku, name, unit
+    FROM order_items
+    WHERE sku IS NOT NULL AND sku <> '' AND sku <> 'N/A'
+    ORDER BY sku, name
+  `)).rows;
+  res.json(rows);
+}));
+
 // GET /api/orders/:id
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   await ensureImportance();
@@ -265,13 +279,25 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (!invoice_number || !customer_name || !required_delivery_date) {
     return res.status(400).json({ error: 'invoice_number, customer_name, required_delivery_date are required' });
   }
+
+  // Manual invoice codes are restricted: "SI…" doc numbers are reserved for the
+  // SQL Account webhook, and the code must be a clean token — this stops a manual
+  // order colliding with (or masquerading as) a real SQL Account invoice.
+  const code = String(invoice_number).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9/_-]{2,39}$/.test(code)) {
+    return res.status(400).json({ error: 'Invoice number must be 3–40 characters: letters, digits, and - _ / only.' });
+  }
+  if (/^SI\d/i.test(code)) {
+    return res.status(400).json({ error: "Invoice numbers starting with 'SI' are reserved for SQL Account. Use a manual code, e.g. INV-26-0001." });
+  }
+
   if (!VALID_IMPORTANCE.includes(importance)) {
     return res.status(400).json({ error: 'Invalid importance level' });
   }
 
   // Duplicate check
-  const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [invoice_number])).rows[0];
-  if (existing) return res.status(409).json({ error: `Invoice ${invoice_number} already exists` });
+  const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [code])).rows[0];
+  if (existing) return res.status(409).json({ error: `Invoice ${code} already exists` });
 
   const orderId = uuidv4();
   const initialStage = skip_production ? 'packing' : 'order';
@@ -282,7 +308,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
         order_date, required_delivery_date, expiry_date, stage, priority, importance,
         skip_production, pic_id, notes, source, created_by)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'manual', $14)
-    `, [orderId, invoice_number, customer_name, customer_contact || null,
+    `, [orderId, code, customer_name, customer_contact || null,
       order_date || new Date().toISOString().slice(0, 10),
       required_delivery_date, expiry_date || null,
       initialStage, priority, importance, Boolean(skip_production),
@@ -298,7 +324,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
       [uuidv4(), orderId, initialStage, req.user.id]);
 
     await logActivity(q, { orderId, userId: req.user.id, action: 'order_created',
-      details: `Order ${invoice_number} created`, newValue: initialStage, ipAddress: req.ip });
+      details: `Order ${code} created`, newValue: initialStage, ipAddress: req.ip });
   });
 
   const created = (await query('SELECT * FROM orders WHERE id = $1', [orderId])).rows[0];

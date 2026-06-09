@@ -7,11 +7,14 @@ const { query } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-// Roles allowed to manage staff accounts (create / reset password / enable-disable).
-const USER_MANAGERS = ['super_admin', 'admin', 'operations_controller'];
+// Reading the staff list stays open to Ops too — they need it for the PIC picker
+// and the workload view. Managing ACCOUNTS, however, is Admin-only.
+const USER_VIEWERS = ['super_admin', 'admin', 'operations_controller'];
+// Create / reset password / enable-disable / delete — Boss + Office Admin only.
+const USER_MANAGERS = ['super_admin', 'admin'];
 
-// GET /api/users — staff list (managers only)
-router.get('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+// GET /api/users — staff list (viewers: managers + Ops for the PIC picker)
+router.get('/', authenticate, authorize(...USER_VIEWERS), asyncHandler(async (req, res) => {
   const users = (await query(`
     SELECT id, name, email, role, avatar_color, is_active, created_at
     FROM users ORDER BY name ASC
@@ -20,7 +23,7 @@ router.get('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (r
 }));
 
 // GET /api/users/workload
-router.get('/workload', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+router.get('/workload', authenticate, authorize(...USER_VIEWERS), asyncHandler(async (req, res) => {
   const workload = (await query(`
     SELECT u.id, u.name, u.avatar_color, u.role,
       COUNT(o.id)::int AS active_orders
@@ -33,7 +36,7 @@ router.get('/workload', authenticate, authorize(...USER_MANAGERS), asyncHandler(
   res.json(workload);
 }));
 
-// POST /api/users — create user (Super Admin or Ops Controller)
+// POST /api/users — create user (Admin only)
 router.post('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
   const { name, email, role, password, avatar_color } = req.body;
   if (!name || !email || !role || !password) {
