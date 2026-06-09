@@ -191,9 +191,9 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     ${weekFilter}
     ORDER BY
       CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
-      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
       (o.sort_order IS NULL),
       o.sort_order ASC,
+      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
       o.invoice_number ASC
   `;
 
