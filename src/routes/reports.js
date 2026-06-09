@@ -6,6 +6,9 @@ const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
 const ADMIN_ROLES = ['super_admin', 'operations_controller'];
+// Back-office Admin (deputy) gets the read-only Dashboard overview — but NOT the
+// detailed Reports tabs (those stay Boss/Ops/Lead).
+const DASHBOARD_ROLES = ['super_admin', 'operations_controller', 'admin'];
 // Production Lead (floor supervisor) may see the name-free reports: production,
 // packing, and the per-person staff / person-in-charge tables. Orders and the
 // dashboard stay Boss/Ops only — they list customer names. Delivery is the
@@ -14,7 +17,7 @@ const PROD_REPORT_ROLES = ['super_admin', 'operations_controller', 'production_l
 const DELIVERY_REPORT_ROLES = ['super_admin', 'operations_controller'];
 
 // GET /api/reports/dashboard — boss overview
-router.get('/dashboard', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/dashboard', authenticate, authorize(...DASHBOARD_ROLES), asyncHandler(async (req, res) => {
   const stageCounts = (await query(`
     SELECT stage, COUNT(*)::int AS count FROM orders
     WHERE stage NOT IN ('delivered','cancelled')

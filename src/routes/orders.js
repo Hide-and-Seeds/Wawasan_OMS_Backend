@@ -347,8 +347,11 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
 // PATCH /api/orders/:id — edit order details
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller'];
-  if (!allowed.includes(req.user.role)) {
+  const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
+  // Back-office Admin (deputy) may triage routing — priority / importance only.
+  // Customer details, dates and notes stay Boss/Ops; PIC is set via assign-pic.
+  const isAdmin = req.user.role === 'admin';
+  if (!isManager && !isAdmin) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
 
@@ -360,7 +363,9 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'Invalid importance level' });
   }
 
-  const fields = ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'importance', 'notes', 'pic_id'];
+  const fields = isManager
+    ? ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'importance', 'notes', 'pic_id']
+    : ['priority', 'importance'];
   const updates = [];
   const values = [];
 
@@ -452,7 +457,12 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // POST /api/orders/:id/assign-pic
-router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
+  // Boss, Ops, or back-office Admin (deputy) may set the PIC. (Not canMoveOrders —
+  // that gate also guards order delete, which Admin must NOT have.)
+  if (!['super_admin', 'operations_controller', 'admin'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  }
   const { pic_id } = req.body;
 
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
