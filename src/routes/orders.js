@@ -190,10 +190,10 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     WHERE o.stage NOT IN ('delivered','cancelled')
     ${weekFilter}
     ORDER BY
+      CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
+      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
       (o.sort_order IS NULL),
       o.sort_order ASC,
-      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
-      CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
       o.invoice_number ASC
   `;
 
@@ -490,18 +490,28 @@ router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (
 // can't be captured by the POST /:id/* routes.
 router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'operations_controller', 'production_lead'), asyncHandler(async (req, res) => {
   await ensureSortOrder();
-  const { stage, ordered_ids } = req.body || {};
+  await ensureImportance();
+  const { stage, ordered_ids, set_importance } = req.body || {};
   if (!VALID_STAGES.includes(stage)) return res.status(400).json({ error: 'Invalid stage' });
   if (!Array.isArray(ordered_ids) || ordered_ids.length === 0) return res.status(400).json({ error: 'ordered_ids array required' });
+  // The dragged card may also take a new priority tier inferred from its neighbours.
+  if (set_importance && !VALID_IMPORTANCE.includes(set_importance.importance)) return res.status(400).json({ error: 'Invalid importance level' });
 
   await withTransaction(async (q) => {
+    if (set_importance && set_importance.id) {
+      await q('UPDATE orders SET importance = $1, updated_at = now() WHERE id = $2 AND stage = $3',
+        [set_importance.importance, set_importance.id, stage]);
+    }
     // Position is the array index; only rows actually in that stage are touched.
     for (let i = 0; i < ordered_ids.length; i++) {
       await q('UPDATE orders SET sort_order = $1, updated_at = now() WHERE id = $2 AND stage = $3',
         [i, ordered_ids[i], stage]);
     }
-    await logActivity(q, { orderId: null, userId: req.user.id, action: 'orders_reordered',
-      details: `Reordered ${ordered_ids.length} orders in ${stage}`, ipAddress: req.ip || null });
+    await logActivity(q, {
+      orderId: (set_importance && set_importance.id) || null, userId: req.user.id, action: 'orders_reordered',
+      details: `Reordered ${ordered_ids.length} in ${stage}${set_importance ? ` · priority → ${set_importance.importance}` : ''}`,
+      ipAddress: req.ip || null,
+    });
   });
 
   res.json({ ok: true, count: ordered_ids.length });

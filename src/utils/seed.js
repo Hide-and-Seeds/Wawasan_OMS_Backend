@@ -12,9 +12,9 @@ const { getPool, query } = require('./db');
 // `npm run reset-passwords` (see src/utils/reset-passwords.js).
 const SHARED_PASSWORD = 'wawasan123';
 const users = [
-  // Full-role (Boss-tier) accounts — can do everything. admin@ is also the system
-  // user the SQL Account webhook attributes imported orders to; keep it.
-  { name: 'Boss',                 email: 'admin@wawasancandle.com',    role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#7C3AED' },
+  // Full-role (Boss-tier) accounts — can do everything. admin@ (the developer's master
+  // tester login) is also the system user the SQL Account webhook attributes imports to; keep it.
+  { name: 'DEMO — Master Tester',  email: 'admin@wawasancandle.com',    role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#7C3AED' },
   { name: 'Amy',                  email: 'amy@wawasancandle.com',      role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#E11D48' },
   { name: 'Vincent',              email: 'vincent@wawasancandle.com',  role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#2563EB' },
   { name: 'Ying Fei',             email: 'yingfei@wawasancandle.com',  role: 'super_admin',     password: SHARED_PASSWORD, avatar_color: '#CA8A04' },
