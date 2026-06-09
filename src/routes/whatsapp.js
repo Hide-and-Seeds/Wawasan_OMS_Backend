@@ -56,9 +56,11 @@ function cronRoute(path, handler) { router.get(path, cronOrAdmin, handler); rout
 
 // ── message templates ───────────────────────────────────────────────────────
 const tpl = {
-  received: (o) => `Hi ${o.customer_name}, thank you! Your ${BRAND} order ${o.invoice_number} is confirmed and now in production. We'll message you when it's on the way.`,
+  received: (o) => `Hi ${o.customer_name}, thank you! Your ${BRAND} order ${o.invoice_number} is confirmed and now in production.${o.required_delivery_date ? ` Expected delivery: ${o.required_delivery_date}.` : ''} We'll keep you posted as it progresses.`,
+  ready: (o) => `Hi ${o.customer_name}, your ${BRAND} order ${o.invoice_number} is packed and quality-checked — we're arranging delivery now.`,
   out_for_delivery: (o) => `Hi ${o.customer_name}, good news — your ${BRAND} order ${o.invoice_number} is on the way${o.courier ? ' via ' + o.courier : ''}.${o.tracking_no ? ' Tracking: ' + o.tracking_no + '.' : ''}`,
   delivered: (o) => `Hi ${o.customer_name}, your ${BRAND} order ${o.invoice_number} has been delivered. Thank you for choosing us!`,
+  delayed: (o) => `Hi ${o.customer_name}, a quick update on your ${BRAND} order ${o.invoice_number}: it's briefly on hold${o.waiting_stock ? ' (awaiting materials)' : ''} so it may take a little longer. We'll message you the moment it moves — thanks for your patience.`,
 };
 
 // ── enqueue sweep: derive customer messages from current state (idempotent) ──
@@ -75,10 +77,16 @@ async function enqueueCustomerMessages() {
 
   // "received / in production" — any order that has left the Order column.
   for (const o of (await query(
-    `SELECT id, invoice_number, customer_name, customer_contact FROM orders
+    `SELECT id, invoice_number, customer_name, customer_contact, required_delivery_date FROM orders
      WHERE stage IN ('production','packing','ready_for_delivery','delivered')
        AND customer_contact IS NOT NULL AND customer_contact <> ''`
   )).rows) await ins(toMsisdn(o.customer_contact), tpl.received(o), o.id, 'received');
+
+  // "packed / ready" — order reached Ready for Delivery.
+  for (const o of (await query(
+    `SELECT id, invoice_number, customer_name, customer_contact FROM orders
+     WHERE stage = 'ready_for_delivery' AND customer_contact IS NOT NULL AND customer_contact <> ''`
+  )).rows) await ins(toMsisdn(o.customer_contact), tpl.ready(o), o.id, 'ready');
 
   // "out for delivery" — a delivery is scheduled / in transit.
   for (const o of (await query(
@@ -96,6 +104,13 @@ async function enqueueCustomerMessages() {
      FROM deliveries d JOIN orders o ON d.order_id = o.id
      WHERE d.status = 'delivered' AND o.customer_contact IS NOT NULL AND o.customer_contact <> ''`
   )).rows) await ins(toMsisdn(o.customer_contact), tpl.delivered(o), o.id, 'delivered');
+
+  // "delay notice" — order on hold or waiting stock.
+  for (const o of (await query(
+    `SELECT id, invoice_number, customer_name, customer_contact, waiting_stock FROM orders
+     WHERE (on_hold = true OR waiting_stock = true) AND stage NOT IN ('delivered','cancelled')
+       AND customer_contact IS NOT NULL AND customer_contact <> ''`
+  )).rows) await ins(toMsisdn(o.customer_contact), tpl.delayed(o), o.id, 'delayed');
 
   return enqueued;
 }
@@ -197,6 +212,20 @@ router.post('/cancel', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asy
     ? await query(`UPDATE message_queue SET status='cancelled', error='cancelled by user' WHERE id=$1 AND status IN ('queued','sending')`, [id])
     : await query(`UPDATE message_queue SET status='cancelled', error='cancelled by user' WHERE status IN ('queued','sending')`);
   res.json({ ok: true, cancelled: r.rowCount });
+}));
+
+// POST /api/whatsapp/redirect — point queued messages at a different number
+// (demo helper, so a viewer can watch them arrive on their own phone).
+// { to } = all queued | { id, to } = one. Only affects 'queued' rows.
+router.post('/redirect', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  await ensureQueue();
+  const { id, to } = req.body || {};
+  if (!to || !String(to).trim()) return res.status(400).json({ error: 'to is required' });
+  const recipient = toMsisdn(to) || String(to).trim();
+  const r = id
+    ? await query(`UPDATE message_queue SET recipient = $1 WHERE id = $2 AND status = 'queued'`, [recipient, id])
+    : await query(`UPDATE message_queue SET recipient = $1 WHERE status = 'queued'`, [recipient]);
+  res.json({ ok: true, updated: r.rowCount, recipient });
 }));
 
 // ── always-on worker drip (production path; matches the wa-worker loop) ──────
