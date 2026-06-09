@@ -188,6 +188,17 @@ router.post('/test', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async
   res.json({ ok: true, queued_id: r.rows[0].id });
 }));
 
+// POST /api/whatsapp/cancel — stop pending messages (the "undo"). Optional { id }
+// for a single row, otherwise cancels every queued/sending message.
+router.post('/cancel', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  await ensureQueue();
+  const { id } = req.body || {};
+  const r = id
+    ? await query(`UPDATE message_queue SET status='cancelled', error='cancelled by user' WHERE id=$1 AND status IN ('queued','sending')`, [id])
+    : await query(`UPDATE message_queue SET status='cancelled', error='cancelled by user' WHERE status IN ('queued','sending')`);
+  res.json({ ok: true, cancelled: r.rowCount });
+}));
+
 // ── always-on worker drip (production path; matches the wa-worker loop) ──────
 // GET /api/whatsapp/worker/next — claim one queued message to send.
 router.get('/worker/next', workerAuth, asyncHandler(async (req, res) => {
