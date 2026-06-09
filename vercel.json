@@ -2,5 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
+  ],
+  "crons": [
+    { "path": "/api/whatsapp/enqueue", "schedule": "0 0 * * *" },
+    { "path": "/api/whatsapp/morning-brief", "schedule": "0 23 * * *" }
   ]
 }

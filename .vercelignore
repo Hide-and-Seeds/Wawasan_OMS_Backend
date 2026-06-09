@@ -5,3 +5,5 @@ uploads/
 *.db-wal
 .env
 .env.local
+wa-worker/
+demo-seed.sql
