@@ -6,8 +6,11 @@ const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
 const ADMIN_ROLES = ['super_admin', 'operations_controller'];
-// Reports are Boss/Ops only — production lead and delivery coordinator have no report access.
-const PROD_REPORT_ROLES = ['super_admin', 'operations_controller'];
+// Production Lead (floor supervisor) may see the name-free reports: production,
+// packing, and the per-person staff / person-in-charge tables. Orders and the
+// dashboard stay Boss/Ops only — they list customer names. Delivery is the
+// coordinator's domain, not the lead's.
+const PROD_REPORT_ROLES = ['super_admin', 'operations_controller', 'production_lead'];
 const DELIVERY_REPORT_ROLES = ['super_admin', 'operations_controller'];
 
 // GET /api/reports/dashboard — boss overview
@@ -292,8 +295,8 @@ const FORWARD_PAIRS = `(st.from_stage, st.to_stage) IN
    ('packing','ready_for_delivery'),('ready_for_delivery','delivered'))`;
 
 // GET /api/reports/staff — per-person productivity: stage completions, items
-// marked done, and reworks, in the chosen period. Boss/Ops only (names individuals).
-router.get('/staff', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+// marked done, and reworks, in the chosen period. Boss/Ops + Production Lead (no customer names).
+router.get('/staff', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const params = [];
   // Matching date windows for stage_transitions (created_at) and order_items (made_at).
@@ -343,8 +346,8 @@ router.get('/staff', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async
 }));
 
 // GET /api/reports/pic — per-person-in-charge view: current open workload
-// (active / overdue / on-hold, live) plus orders completed in the period. Boss/Ops only.
-router.get('/pic', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+// (active / overdue / on-hold, live) plus orders completed in the period. Boss/Ops + Production Lead (no customer names).
+router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const params = [];
   let stF;
