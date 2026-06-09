@@ -591,4 +591,23 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   res.status(201).json({ id: orderId, invoice_number });
 }));
 
+// DELETE /api/orders/:id — remove an order (Boss/Ops). Testing/cleanup helper;
+// also clears any queued WhatsApp messages for it so they don't still send.
+router.delete('/:id', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+  const found = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
+  if (!found) return res.status(404).json({ error: 'Order not found' });
+  await query('DELETE FROM message_queue WHERE order_id = $1', [req.params.id]).catch(() => {});
+  await query('DELETE FROM orders WHERE id = $1', [req.params.id]);
+  res.json({ ok: true, deleted: 1 });
+}));
+
+// POST /api/orders/bulk-delete — remove several at once (Boss/Ops). { ids: [...] }
+router.post('/bulk-delete', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'ids array required' });
+  await query('DELETE FROM message_queue WHERE order_id = ANY($1::uuid[])', [ids]).catch(() => {});
+  const r = await query('DELETE FROM orders WHERE id = ANY($1::uuid[])', [ids]);
+  res.json({ ok: true, deleted: r.rowCount });
+}));
+
 module.exports = router;

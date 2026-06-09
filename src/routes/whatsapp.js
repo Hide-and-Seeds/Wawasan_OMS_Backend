@@ -209,9 +209,9 @@ router.post('/cancel', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asy
   await ensureQueue();
   const { id } = req.body || {};
   const r = id
-    ? await query(`UPDATE message_queue SET status='cancelled', error='cancelled by user' WHERE id=$1 AND status IN ('queued','sending')`, [id])
-    : await query(`UPDATE message_queue SET status='cancelled', error='cancelled by user' WHERE status IN ('queued','sending')`);
-  res.json({ ok: true, cancelled: r.rowCount });
+    ? await query(`DELETE FROM message_queue WHERE id = $1 AND status IN ('queued','sending')`, [id])
+    : await query(`DELETE FROM message_queue WHERE status IN ('queued','sending')`);
+  res.json({ ok: true, deleted: r.rowCount });
 }));
 
 // POST /api/whatsapp/redirect — point queued messages at a different number
