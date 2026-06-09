@@ -70,6 +70,11 @@ If you add a third creation path, copy the manual handler's shape; don't reinven
 - Build it from **real customers + real STK SKUs + real UOM**. Escape apostrophes
   in product names for SQL (`6'S` → `6''S`). It depends on the seeded users +
   deliverers existing (`npm run seed` first).
+- **Packing tracks its own per-SKU columns** (`pack_status`/`pack_made`/`pack_made_at`/
+  `pack_made_by`) and the kanban/floor count the **stage-correct** column — so an item
+  done in production still reads 0% in packing until packed. For demo orders at
+  `packing` or later you must also set `pack_status='done'` (packed by a packing-staff
+  user), or they show 0% packed; the seed's PACKING PROGRESS block does this.
 - Load via the **Supabase SQL editor** (or the Supabase MCP). `npm run seed` is the
   minimal bootstrap (users/deliverers/settings + a few sample orders);
   `demo-seed.sql` is the realistic layer on top.

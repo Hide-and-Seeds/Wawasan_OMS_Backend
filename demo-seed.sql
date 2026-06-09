@@ -100,6 +100,21 @@ BEGIN
   -- o12 Perfect Design — on hold (artwork)
   (gen_random_uuid(),o12,'STK131','LILIN PIALA EMAS (ITEM NO:3399) - 6''S X 40 BOXES/CTN' , 5,'BOX',false,NULL,NULL,0,'not_started');
 
+  -- ---- PACKING PROGRESS -------------------------------------
+  -- Packing has its own per-SKU columns (pack_status/pack_made/...); the kanban
+  -- + floor count the stage-correct column, so an item done in production still
+  -- reads 0% in packing until packed. Mark packing done for every order that has
+  -- reached or passed packing, packed by Siti, with stage-appropriate times.
+  UPDATE order_items oi
+  SET pack_status='done', pack_made=true, pack_made_by=siti,
+      pack_made_at = CASE o.stage
+        WHEN 'packing'            THEN now()-interval '6 hours'
+        WHEN 'ready_for_delivery' THEN now()-interval '20 hours'
+        WHEN 'delivered'          THEN now()-interval '4 days'
+      END
+  FROM orders o
+  WHERE o.id=oi.order_id AND o.id IN (o6,o7,o8,o9,o10,o11);
+
   -- ---- STAGE TRANSITIONS (feed the timing/throughput reports) -
   INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by, reason, created_at) VALUES
   -- in production now
