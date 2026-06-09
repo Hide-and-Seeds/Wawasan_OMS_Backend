@@ -148,10 +148,12 @@ router.get('/production', authenticate, authorize(...PROD_REPORT_ROLES), asyncHa
 
 // GET /api/reports/packing — packing performance
 router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
-  const { period = 'weekly' } = req.query;
+  const { period = 'weekly', from, to } = req.query;
 
+  const params = [];
   let dateFilter = '';
-  if (period === 'daily') dateFilter = "AND created_at::date = CURRENT_DATE";
+  if (from && to) { dateFilter = 'AND created_at BETWEEN $1 AND $2'; params.push(from, to); }
+  else if (period === 'daily') dateFilter = "AND created_at::date = CURRENT_DATE";
   else if (period === 'weekly') dateFilter = "AND date_trunc('week', created_at) = date_trunc('week', now())";
   else if (period === 'monthly') dateFilter = "AND date_trunc('month', created_at) = date_trunc('month', now())";
 
@@ -159,7 +161,7 @@ router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandl
     SELECT COUNT(*)::int AS count FROM stage_transitions
     WHERE from_stage = 'packing' AND to_stage = 'ready_for_delivery'
     ${dateFilter}
-  `)).rows[0];
+  `, params)).rows[0];
 
   const avgPackTime = (await query(`
     SELECT AVG(EXTRACT(EPOCH FROM (t2.created_at - t1.created_at)) / 60.0) AS avg_minutes
@@ -167,37 +169,49 @@ router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandl
     JOIN stage_transitions t2 ON t1.order_id = t2.order_id
     WHERE t1.to_stage = 'packing' AND t2.from_stage = 'packing'
     ${dateFilter.replace(/created_at/g, 't1.created_at')}
-  `)).rows[0];
+  `, params)).rows[0];
 
   const reworks = (await query(`
     SELECT COUNT(*)::int AS count FROM stage_transitions
     WHERE from_stage = 'packing' AND to_stage = 'production'
     ${dateFilter}
-  `)).rows[0];
+  `, params)).rows[0];
 
   const inStage = (await query("SELECT COUNT(*)::int AS count FROM orders WHERE stage = 'packing'")).rows[0];
+
+  // Daily packed count (last 14 days) for the trend chart.
+  const dailyTrend = (await query(`
+    SELECT created_at::date AS date, COUNT(*)::int AS count
+    FROM stage_transitions
+    WHERE from_stage = 'packing' AND to_stage = 'ready_for_delivery'
+      AND created_at >= CURRENT_DATE - INTERVAL '14 days'
+    GROUP BY created_at::date ORDER BY date ASC
+  `)).rows;
 
   res.json({
     packed: packed.count,
     in_stage: inStage.count,
     rework_count: reworks.count,
     rework_rate: packed.count > 0 ? ((reworks.count / packed.count) * 100).toFixed(1) : 0,
-    avg_pack_minutes: avgPackTime.avg_minutes != null ? Number(avgPackTime.avg_minutes).toFixed(0) : null
+    avg_pack_minutes: avgPackTime.avg_minutes != null ? Number(avgPackTime.avg_minutes).toFixed(0) : null,
+    daily_trend: dailyTrend
   });
 }));
 
 // GET /api/reports/delivery — delivery performance
 router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), asyncHandler(async (req, res) => {
-  const { period = 'weekly' } = req.query;
+  const { period = 'weekly', from, to } = req.query;
 
+  const params = [];
   let dateFilter = '';
-  if (period === 'daily') dateFilter = "AND d.delivered_at::date = CURRENT_DATE";
+  if (from && to) { dateFilter = 'AND d.delivered_at BETWEEN $1 AND $2'; params.push(from, to); }
+  else if (period === 'daily') dateFilter = "AND d.delivered_at::date = CURRENT_DATE";
   else if (period === 'weekly') dateFilter = "AND date_trunc('week', d.delivered_at) = date_trunc('week', now())";
   else if (period === 'monthly') dateFilter = "AND date_trunc('month', d.delivered_at) = date_trunc('month', now())";
 
   const totalDeliveries = (await query(`
     SELECT COUNT(*)::int AS count FROM deliveries d WHERE d.status = 'delivered' ${dateFilter}
-  `)).rows[0];
+  `, params)).rows[0];
 
   const onTime = (await query(`
     SELECT
@@ -206,7 +220,14 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     FROM deliveries d
     JOIN orders o ON d.order_id = o.id
     WHERE d.status = 'delivered' ${dateFilter}
-  `)).rows[0];
+  `, params)).rows[0];
+
+  // Avg turnaround: hours from when the delivery record was created to delivered.
+  const turnaround = (await query(`
+    SELECT AVG(EXTRACT(EPOCH FROM (d.delivered_at - d.created_at)) / 3600.0) AS avg_hours
+    FROM deliveries d
+    WHERE d.status = 'delivered' AND d.delivered_at IS NOT NULL ${dateFilter}
+  `, params)).rows[0];
 
   const byDeliveryMan = (await query(`
     SELECT COALESCE(dl.id, u.id) AS id, COALESCE(dl.name, u.name) AS name,
@@ -218,19 +239,29 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     JOIN orders o ON d.order_id = o.id
     WHERE d.status = 'delivered' ${dateFilter}
     GROUP BY COALESCE(dl.id, u.id), COALESCE(dl.name, u.name) ORDER BY total DESC
-  `)).rows;
+  `, params)).rows;
 
   // Live snapshot, not period-bound: deliveries still out, and ones that failed.
   const pending = (await query("SELECT COUNT(*)::int AS count FROM deliveries WHERE status IN ('pending','in_transit')")).rows[0];
   const failed = (await query("SELECT COUNT(*)::int AS count FROM deliveries WHERE status = 'failed'")).rows[0];
 
+  // Daily delivered count (last 14 days) for the trend chart.
+  const dailyTrend = (await query(`
+    SELECT d.delivered_at::date AS date, COUNT(*)::int AS count
+    FROM deliveries d
+    WHERE d.status = 'delivered' AND d.delivered_at >= CURRENT_DATE - INTERVAL '14 days'
+    GROUP BY d.delivered_at::date ORDER BY date ASC
+  `)).rows;
+
   res.json({
     total_deliveries: totalDeliveries.count,
     on_time_count: onTime.on_time || 0,
     on_time_rate: onTime.total > 0 ? ((onTime.on_time / onTime.total) * 100).toFixed(1) : 0,
+    avg_turnaround_hours: turnaround.avg_hours != null ? Number(turnaround.avg_hours).toFixed(1) : null,
     pending_count: pending.count,
     failed_count: failed.count,
-    by_delivery_man: byDeliveryMan
+    by_delivery_man: byDeliveryMan,
+    daily_trend: dailyTrend
   });
 }));
 
