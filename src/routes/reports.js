@@ -6,9 +6,9 @@ const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
 const ADMIN_ROLES = ['super_admin', 'operations_controller'];
-// Floor supervisor sees production+packing reports; coordinator sees delivery. Boss/Ops see all.
-const PROD_REPORT_ROLES = ['super_admin', 'operations_controller', 'production_lead'];
-const DELIVERY_REPORT_ROLES = ['super_admin', 'operations_controller', 'delivery_team'];
+// Reports are Boss/Ops only — production lead and delivery coordinator have no report access.
+const PROD_REPORT_ROLES = ['super_admin', 'operations_controller'];
+const DELIVERY_REPORT_ROLES = ['super_admin', 'operations_controller'];
 
 // GET /api/reports/dashboard — boss overview
 router.get('/dashboard', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
