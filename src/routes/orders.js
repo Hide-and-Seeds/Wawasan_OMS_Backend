@@ -110,6 +110,16 @@ async function ensureImportance() {
   _importanceReady = true;
 }
 
+// Self-migration: manual board ordering. NULL = unsorted (falls back to the
+// priority/importance sort); a set value pins the card's position within its
+// stage column. Used by drag-to-reorder (currently the Production column).
+let _sortOrderReady = false;
+async function ensureSortOrder() {
+  if (_sortOrderReady) return;
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS sort_order integer');
+  _sortOrderReady = true;
+}
+
 // GET /api/orders — list with filters
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { stage, priority, search, week, from, to, page = 1, limit = 50 } = req.query;
@@ -162,6 +172,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   await ensureItemColumns();
   await ensureOrderFlags();
   await ensureImportance();
+  await ensureSortOrder();
 
   const weekFilter = week === 'current'
     ? "AND date_trunc('week', o.required_delivery_date) = date_trunc('week', now())"
@@ -178,6 +189,8 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     WHERE o.stage NOT IN ('delivered','cancelled')
     ${weekFilter}
     ORDER BY
+      (o.sort_order IS NULL),
+      o.sort_order ASC,
       CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
       CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
       o.invoice_number ASC
@@ -396,8 +409,10 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   }
 
   await withTransaction(async (q) => {
-    // Clear the PIC on a stage change so the next stage's owner is assigned fresh.
-    await q('UPDATE orders SET stage = $1, pic_id = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
+    // Clear the PIC + any manual board ordering on a stage change (the next stage's
+    // owner is assigned fresh, and a pinned Production position shouldn't follow the
+    // card into the next column).
+    await q('UPDATE orders SET stage = $1, pic_id = NULL, sort_order = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
 
     await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by, reason) VALUES ($1, $2, $3, $4, $5, $6)',
       [uuidv4(), order.id, fromStage, to_stage, req.user.id, reason || null]);
@@ -465,6 +480,29 @@ router.post('/:id/assign-pic', authenticate, canMoveOrders, asyncHandler(async (
   res.json({ message: 'PIC assigned' });
 }));
 
+// POST /api/orders/reorder — set the manual board order for a stage (drag-to-reorder).
+// Shared: the chosen order persists for everyone who views the board. Drives the
+// Production column today. Boss/Admin/Ops/Production Lead only. Single segment so it
+// can't be captured by the POST /:id/* routes.
+router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'operations_controller', 'production_lead'), asyncHandler(async (req, res) => {
+  await ensureSortOrder();
+  const { stage, ordered_ids } = req.body || {};
+  if (!VALID_STAGES.includes(stage)) return res.status(400).json({ error: 'Invalid stage' });
+  if (!Array.isArray(ordered_ids) || ordered_ids.length === 0) return res.status(400).json({ error: 'ordered_ids array required' });
+
+  await withTransaction(async (q) => {
+    // Position is the array index; only rows actually in that stage are touched.
+    for (let i = 0; i < ordered_ids.length; i++) {
+      await q('UPDATE orders SET sort_order = $1, updated_at = now() WHERE id = $2 AND stage = $3',
+        [i, ordered_ids[i], stage]);
+    }
+    await logActivity(q, { orderId: null, userId: req.user.id, action: 'orders_reordered',
+      details: `Reordered ${ordered_ids.length} orders in ${stage}`, ipAddress: req.ip || null });
+  });
+
+  res.json({ ok: true, count: ordered_ids.length });
+}));
+
 // PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags
 router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_controller', 'production_lead'), asyncHandler(async (req, res) => {
   await ensureOrderFlags();
@@ -507,12 +545,16 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
 
   const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
+  // Boss + back-office Admin may amend a placed line (correct a wrong STK / qty / unit).
+  // Adding or removing whole lines stays locked (POST/DELETE below) — those must match
+  // the source invoice in SQL Account.
+  const canAmend = ['super_admin', 'admin'].includes(req.user.role);
   const b = req.body || {};
   const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
   // Items are tracked by status only: not_started → in_progress → done.
   const progressing = b.status !== undefined;
   if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
-  if (editingFields) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct STKs/quantities in SQL Account.' });
+  if (editingFields && !canAmend) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct STKs/quantities in SQL Account.' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
   // Stage staff may only record progress while the order sits in the stage they own.
   if (progressing && !isManager) {
