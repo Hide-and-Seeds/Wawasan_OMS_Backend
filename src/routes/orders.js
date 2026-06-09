@@ -552,19 +552,50 @@ router.delete('/:id/attachments/:attId', authenticate, canMoveOrders, asyncHandl
   res.json({ ok: true });
 }));
 
-// POST /api/orders/webhook/sql-account — SQL Account integration
+// POST /api/orders/webhook/sql-account — SQL Account integration.
+// SQL Account fires this the moment an invoice is generated; the order lands in
+// the 'order' column and the production workflow begins. It mirrors a manual
+// create (writes the initial stage_transition + activity_log so the board, the
+// timing reports and the audit trail all see it), then notifies Operations so a
+// human routes it (assigns a PIC). Idempotent: a repeat POST for the same
+// invoice returns 409 and never creates a duplicate.
+//
+// Expected JSON body (full contract + test command in SQL-ACCOUNT-WEBHOOK.md):
+//   { invoice_number, customer_name, customer_contact?, order_date?,
+//     required_delivery_date?, expiry_date?, priority?, importance?,
+//     po_ref?, payment_terms?, notes?, skip_production?,
+//     items: [{ sku, name, quantity, unit }] }
+// Only invoice_number + customer_name are required — SQL Account invoices carry
+// payment terms, not a delivery date, so required_delivery_date defaults to a
+// lead time that Ops can adjust on the board.
+const SQL_ACCOUNT_LEAD_DAYS = parseInt(process.env.SQL_ACCOUNT_DEFAULT_LEAD_DAYS) || 7;
+
 router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
-  // Validate webhook secret
+  // Validate webhook secret. Fail closed: if the secret isn't configured we must
+  // reject, otherwise (undefined === undefined) would let unauthenticated calls through.
   const secret = req.headers['x-webhook-secret'];
-  if (secret !== process.env.SQL_ACCOUNT_WEBHOOK_SECRET) {
+  if (!process.env.SQL_ACCOUNT_WEBHOOK_SECRET || secret !== process.env.SQL_ACCOUNT_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Invalid webhook secret' });
   }
 
-  const { invoice_number, customer_name, customer_contact, required_delivery_date, items = [] } = req.body;
+  await ensureImportance();
+  await ensureOrderFlags();
+
+  const {
+    invoice_number, customer_name, customer_contact,
+    order_date, required_delivery_date, expiry_date,
+    priority, importance, po_ref, payment_terms, notes,
+    skip_production = false, items = [],
+  } = req.body || {};
 
   if (!invoice_number || !customer_name) {
-    return res.status(400).json({ error: 'Invalid payload' });
+    return res.status(400).json({ error: 'invoice_number and customer_name are required' });
   }
+
+  // Sanitise rather than reject: an automated trigger must never drop an invoice
+  // because of one stray field. Bad values fall back to the safe default.
+  const safePriority = priority === 'urgent' ? 'urgent' : 'normal';
+  const safeImportance = VALID_IMPORTANCE.includes(importance) ? importance : 'standard';
 
   const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [invoice_number])).rows[0];
   if (existing) return res.status(409).json({ error: 'Duplicate invoice', existing_id: existing.id });
@@ -572,23 +603,54 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   const systemUser = (await query("SELECT id FROM users WHERE role = 'super_admin' LIMIT 1")).rows[0];
   if (!systemUser) return res.status(500).json({ error: 'No system user configured' });
 
+  // PO ref + payment terms have no dedicated column (money lives in SQL Account);
+  // surface them on the order's notes the same way the demo data does.
+  const composedNotes = [
+    po_ref ? `PO ${po_ref}` : null,
+    payment_terms || null,
+    notes || null,
+  ].filter(Boolean).join(' · ') || null;
+
+  const initialStage = skip_production ? 'packing' : 'order';
   const orderId = uuidv4();
 
   await withTransaction(async (q) => {
     await q(`
       INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
-        order_date, required_delivery_date, stage, source, created_by)
-      VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, 'order', 'sql_account', $6)
+        order_date, required_delivery_date, expiry_date, stage, priority, importance,
+        skip_production, notes, source, created_by)
+      VALUES ($1, $2, $3, $4,
+        COALESCE($5::date, CURRENT_DATE),
+        COALESCE($6::date, CURRENT_DATE + $7::int),
+        $8::date, $9, $10, $11, $12, $13, 'sql_account', $14)
     `, [orderId, invoice_number, customer_name, customer_contact || null,
-      required_delivery_date, systemUser.id]);
+      order_date || null, required_delivery_date || null, SQL_ACCOUNT_LEAD_DAYS,
+      expiry_date || null, initialStage, safePriority, safeImportance,
+      Boolean(skip_production), composedNotes, systemUser.id]);
 
     for (const item of items) {
       await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
-        [uuidv4(), orderId, item.sku || 'N/A', item.name, item.quantity, item.unit || 'pcs']);
+        [uuidv4(), orderId, item.sku || 'N/A', item.name || item.sku || 'Item', item.quantity ?? 1, item.unit || 'pcs']);
+    }
+
+    // Initial stage transition (NULL → first stage) — the timing reports read this table.
+    await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES ($1, $2, NULL, $3, $4)',
+      [uuidv4(), orderId, initialStage, systemUser.id]);
+
+    await logActivity(q, { orderId, userId: systemUser.id, action: 'order_created',
+      details: `Order ${invoice_number} imported from SQL Account`, newValue: initialStage, ipAddress: req.ip });
+
+    // Tell Operations + Admin a new invoice arrived so they route it (assign PIC, set priority).
+    const routers = (await q("SELECT id FROM users WHERE role IN ('operations_controller','super_admin') AND is_active = true")).rows;
+    for (const u of routers) {
+      await notify(q, { userId: u.id, type: 'order_stage_entered',
+        title: 'New invoice from SQL Account',
+        message: `${invoice_number} — ${customer_name} landed in Order. Assign a PIC to start production.`,
+        orderId });
     }
   });
 
-  res.status(201).json({ id: orderId, invoice_number });
+  res.status(201).json({ id: orderId, invoice_number, stage: initialStage });
 }));
 
 // DELETE /api/orders/:id — remove an order (Boss/Ops). Testing/cleanup helper;

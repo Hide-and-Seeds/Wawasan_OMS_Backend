@@ -131,20 +131,33 @@ Session expires after 8 hours.
 
 ## SQL Account Webhook
 
-Configure SQL Account to POST to `/api/orders/webhook/sql-account` with header `X-Webhook-Secret: <your-secret>`.
+When SQL Account generates an invoice it POSTs to `/api/orders/webhook/sql-account`
+with header `x-webhook-secret: <SQL_ACCOUNT_WEBHOOK_SECRET>`. The order lands in
+the **Order** column (`source = sql_account`), writes its initial stage
+transition + audit entry, and notifies Operations to assign a PIC. Re-sending the
+same `invoice_number` returns `409` (idempotent — no duplicate).
 
-Payload:
+Only `invoice_number` and `customer_name` are required; invoices carry payment
+terms rather than a delivery date, so `required_delivery_date` defaults to order
+date + `SQL_ACCOUNT_DEFAULT_LEAD_DAYS`. Money is not sent (it stays in SQL Account).
+
 ```json
 {
-  "invoice_number": "INV-2024-123",
-  "customer_name": "ABC Company",
-  "customer_contact": "0123456789",
-  "required_delivery_date": "2024-12-31",
+  "invoice_number": "SI26060059",
+  "customer_name": "PERFECT DESIGN TRADING SDN BHD",
+  "customer_contact": "011-10841868",
+  "order_date": "2026-06-06",
+  "po_ref": "PO-001652",
+  "payment_terms": "C.O.D.",
   "items": [
-    { "sku": "CND-001", "name": "Lavender Candle 200g", "quantity": 100, "unit": "pcs" }
+    { "sku": "STK006", "name": "FIRE CHICKEN FIRESTARTER (40 BIJI) - 72 BOX/CTN", "quantity": 10, "unit": "CTN" },
+    { "sku": "STK035", "name": "SERAI LILIN ANTI INSECTS CANDLES - 2PCS/PACK (66 PACKS/CTN)", "quantity": 2, "unit": "CTN" }
   ]
 }
 ```
+
+**Full contract, response codes, a test command, and SQL-Account-side wiring
+options are in [`SQL-ACCOUNT-WEBHOOK.md`](./SQL-ACCOUNT-WEBHOOK.md).**
 
 ## Deployment (Supabase + Vercel)
 
