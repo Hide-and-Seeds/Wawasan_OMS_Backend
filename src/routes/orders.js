@@ -77,6 +77,14 @@ async function ensureItemColumns() {
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_by uuid REFERENCES users(id)');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS made_qty integer NOT NULL DEFAULT 0');
   await query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'not_started'");
+  // Packing tracks its own per-SKU progress, kept separate from production. A SKU
+  // marked done in production therefore starts fresh ('not_started') for packing,
+  // so packing staff see a real checklist instead of an already-complete one.
+  // (status/made/made_at/made_by = production; pack_* = packing.)
+  await query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_status text NOT NULL DEFAULT 'not_started'");
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_made boolean NOT NULL DEFAULT false');
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_made_at timestamptz');
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_made_by uuid REFERENCES users(id)');
   // Backfill status from the legacy made / made_qty fields (one-time; cheap no-op afterwards).
   await query("UPDATE order_items SET status = CASE WHEN made THEN 'done' WHEN made_qty > 0 THEN 'in_progress' ELSE 'not_started' END WHERE status = 'not_started' AND (made = true OR made_qty > 0)");
   _itemColsReady = true;
@@ -163,7 +171,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
-      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND made) AS made_count,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND (CASE WHEN o.stage = 'packing' THEN pack_made ELSE made END)) AS made_count,
       (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
@@ -204,6 +212,7 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
 // GET /api/orders/:id
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   await ensureImportance();
+  await ensureItemColumns();
   const order = (await query(`
     SELECT o.*, u.name AS pic_name, u.avatar_color AS pic_color, cb.name AS created_by_name
     FROM orders o
@@ -214,7 +223,12 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
 
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const items = (await query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at', [order.id])).rows;
+  const rawItems = (await query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at', [order.id])).rows;
+  // While an order sits in packing, surface the packing progress as the live status
+  // (production progress is preserved in the pack_*-less columns and in reports).
+  const items = order.stage === 'packing'
+    ? rawItems.map((it) => ({ ...it, status: it.pack_status, made: it.pack_made, made_at: it.pack_made_at, made_by: it.pack_made_by }))
+    : rawItems;
   const attachments = (await query(`
     SELECT a.*, u.name AS uploaded_by_name FROM order_attachments a
     JOIN users u ON a.uploaded_by = u.id
@@ -451,6 +465,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
     'SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [req.params.itemId, req.params.id]
   )).rows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
+  const ord = (await query('SELECT stage FROM orders WHERE id = $1', [req.params.id])).rows[0];
 
   const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
@@ -464,7 +479,6 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   // Stage staff may only record progress while the order sits in the stage they own.
   if (progressing && !isManager) {
     const PROGRESS_STAGES = { production_lead: ['production', 'packing'], production_staff: ['production'], packing_staff: ['packing'] };
-    const ord = (await query('SELECT stage FROM orders WHERE id = $1', [req.params.id])).rows[0];
     if (!ord || !(PROGRESS_STAGES[req.user.role] || []).includes(ord.stage)) {
       return res.status(403).json({ error: 'You can only update items while the order is in your stage' });
     }
@@ -481,11 +495,17 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
 
   if (progressing) {
     const status = b.status;
-    // Keep the legacy `made` boolean in sync so board/floor "SKUs done" counts keep working.
-    sets.push(`status = $${vals.push(status)}`);
-    sets.push(`made = $${vals.push(status === 'done')}`);
-    sets.push(`made_at = $${vals.push(status === 'not_started' ? null : new Date().toISOString())}`);
-    sets.push(`made_by = $${vals.push(status === 'not_started' ? null : req.user.id)}`);
+    // Write to the column set for the stage the order is in: packing → pack_*,
+    // everything else → production columns. Keep the matching `made` boolean in
+    // sync so board/floor "SKUs done" counts keep working.
+    const packing = ord && ord.stage === 'packing';
+    const col = packing
+      ? { s: 'pack_status', m: 'pack_made', at: 'pack_made_at', by: 'pack_made_by' }
+      : { s: 'status', m: 'made', at: 'made_at', by: 'made_by' };
+    sets.push(`${col.s} = $${vals.push(status)}`);
+    sets.push(`${col.m} = $${vals.push(status === 'done')}`);
+    sets.push(`${col.at} = $${vals.push(status === 'not_started' ? null : new Date().toISOString())}`);
+    sets.push(`${col.by} = $${vals.push(status === 'not_started' ? null : req.user.id)}`);
   }
   if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
 

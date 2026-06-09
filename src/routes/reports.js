@@ -366,6 +366,13 @@ router.get('/staff', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler
     itF = "AND date_trunc('week', oi.made_at) = date_trunc('week', now())";
   }
 
+  // A Production Lead only oversees the make + pack floor, so scope the people they
+  // see to that team (excludes delivery dispatcher and ops/admin). Boss/Ops see all.
+  const teamRoles = ['production_lead', 'production_staff', 'packing_staff'];
+  const leadFilter = req.user.role === 'production_lead'
+    ? `AND u.role = ANY($${params.push(teamRoles)}::text[])`
+    : '';
+
   const staff = (await query(`
     WITH trans AS (
       SELECT st.transitioned_by AS uid,
@@ -389,6 +396,7 @@ router.get('/staff', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler
     LEFT JOIN trans t ON t.uid = u.id
     LEFT JOIN items i ON i.uid = u.id
     WHERE COALESCE(t.completions, 0) + COALESCE(t.reworks, 0) + COALESCE(i.items_done, 0) > 0
+      ${leadFilter}
     ORDER BY completions DESC, items_done DESC, u.name ASC
   `, params)).rows;
 
@@ -408,6 +416,11 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
 
   // Roles that can hold orders as PIC — keeps zero-load assignees visible in the table.
   const picRoles = ['operations_controller', 'production_lead', 'production_staff', 'packing_staff', 'delivery_team'];
+  // Production Lead is scoped to the make + pack team (no delivery dispatcher / ops).
+  const teamRoles = ['production_lead', 'production_staff', 'packing_staff'];
+  const leadFilter = req.user.role === 'production_lead'
+    ? `AND u.role = ANY($${params.push(teamRoles)}::text[])`
+    : '';
 
   const pics = (await query(`
     WITH wl AS (
@@ -433,6 +446,7 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
     LEFT JOIN done d ON d.uid = u.id
     WHERE u.is_active = true
       AND (COALESCE(w.active, 0) > 0 OR COALESCE(d.completed, 0) > 0 OR u.role = ANY($${params.push(picRoles)}::text[]))
+      ${leadFilter}
     ORDER BY active DESC, completed DESC, u.name ASC
   `, params)).rows;
 

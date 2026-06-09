@@ -87,6 +87,12 @@ create table if not exists order_items (
   made_by    uuid references users(id),
   made_qty   integer not null default 0,
   status     text not null default 'not_started' check (status in ('not_started','in_progress','done')),
+  -- Packing tracks its own per-SKU progress, separate from production (status/made above),
+  -- so a SKU done in production starts fresh for packing.
+  pack_status   text not null default 'not_started' check (pack_status in ('not_started','in_progress','done')),
+  pack_made     boolean not null default false,
+  pack_made_at  timestamptz,
+  pack_made_by  uuid references users(id),
   created_at timestamptz not null default now()
 );
 
