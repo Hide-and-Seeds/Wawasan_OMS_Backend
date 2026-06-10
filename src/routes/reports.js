@@ -901,4 +901,63 @@ router.get('/scorecard', authenticate, asyncHandler(async (req, res) => {
   res.json({ unit, period, weights, leaderboard });
 }));
 
+// GET /api/reports/trend?months=6 — month-over-month trend: completed orders,
+// on-time %, rework % and avg cycle (days), one row per month for the last N
+// months (empty months included). The "are we getting better or worse" view for
+// the monthly review. All from existing fields — no money. Boss/Ops only.
+router.get('/trend', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  let n = parseInt(req.query.months, 10);
+  if (!Number.isFinite(n) || n < 3) n = 6;
+  if (n > 12) n = 12;
+  const back = n - 1; // integer we control — safe to inline into the interval
+
+  const trend = (await query(`
+    WITH months AS (
+      SELECT generate_series(
+        date_trunc('month', now()) - INTERVAL '${back} months',
+        date_trunc('month', now()),
+        INTERVAL '1 month'
+      )::date AS m
+    ),
+    deliv AS (
+      SELECT date_trunc('month', d.delivered_at)::date AS m,
+        COUNT(*)::int AS completed,
+        SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
+      FROM deliveries d JOIN orders o ON o.id = d.order_id
+      WHERE d.status = 'delivered' GROUP BY 1
+    ),
+    prod AS (
+      SELECT date_trunc('month', created_at)::date AS m,
+        SUM(CASE WHEN from_stage='production' AND to_stage='packing' THEN 1 ELSE 0 END)::int AS produced,
+        SUM(CASE WHEN from_stage='packing' AND to_stage='production' THEN 1 ELSE 0 END)::int AS reworks
+      FROM stage_transitions GROUP BY 1
+    ),
+    starts AS (SELECT order_id, MIN(created_at) AS s FROM stage_transitions GROUP BY order_id),
+    cyc AS (
+      SELECT date_trunc('month', dl.created_at)::date AS m,
+        ROUND(AVG(EXTRACT(EPOCH FROM (dl.created_at - st.s)) / 86400.0)::numeric, 1) AS avg_days
+      FROM stage_transitions dl JOIN starts st ON st.order_id = dl.order_id
+      WHERE dl.to_stage = 'delivered' GROUP BY 1
+    )
+    SELECT to_char(months.m, 'YYYY-MM') AS month,
+      COALESCE(deliv.completed, 0) AS completed,
+      CASE WHEN COALESCE(deliv.completed, 0) > 0 THEN ROUND(deliv.on_time * 100.0 / deliv.completed, 1) ELSE NULL END AS on_time_rate,
+      CASE WHEN COALESCE(prod.produced, 0) > 0 THEN ROUND(prod.reworks * 100.0 / prod.produced, 1) ELSE NULL END AS rework_rate,
+      cyc.avg_days AS avg_cycle_days
+    FROM months
+    LEFT JOIN deliv ON deliv.m = months.m
+    LEFT JOIN prod  ON prod.m  = months.m
+    LEFT JOIN cyc   ON cyc.m   = months.m
+    ORDER BY months.m
+  `)).rows.map((r) => ({
+    month: r.month,
+    completed: r.completed,
+    on_time_rate: r.on_time_rate == null ? null : Number(r.on_time_rate),
+    rework_rate: r.rework_rate == null ? null : Number(r.rework_rate),
+    avg_cycle_days: r.avg_cycle_days == null ? null : Number(r.avg_cycle_days),
+  }));
+
+  res.json({ months: n, trend });
+}));
+
 module.exports = router;
