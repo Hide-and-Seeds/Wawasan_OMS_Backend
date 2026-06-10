@@ -154,10 +154,12 @@ create table if not exists production_remarks (
 create table if not exists notifications (
   id         uuid primary key default gen_random_uuid(),
   user_id    uuid not null references users(id) on delete cascade,
-  type       text not null check (type in (
-    'order_stage_entered','pic_assigned','urgent_flag',
-    'order_overdue','weekly_remark','rework_returned'
-  )),
+  -- type is a server-controlled category hint (order_stage_entered, pic_assigned,
+  -- urgent_flag, order_overdue, weekly_remark, rework_returned, order_blocked,
+  -- order_delivered, order_reopened, …). Intentionally NOT a CHECK constraint: it's
+  -- not user input, and a strict list just 500s the insert whenever a new event type
+  -- is added (this bit delivery + hold notifications). Keep it open.
+  type       text not null,
   title      text not null,
   message    text,
   order_id   uuid references orders(id) on delete set null,
