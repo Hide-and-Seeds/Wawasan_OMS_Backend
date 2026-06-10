@@ -109,6 +109,19 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_scheduled', $4)`,
       [uuidv4(), order_id, req.user.id, `Delivery scheduled${scheduled_date ? ' for ' + scheduled_date : ''}`]);
+
+    // Dispatch usually books this — tell the PIC + managers the order now has a slot.
+    const ord = (await q('SELECT invoice_number, pic_id FROM orders WHERE id = $1', [order_id])).rows[0];
+    if (ord) {
+      const recips = new Set((await q("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id));
+      if (ord.pic_id) recips.add(ord.pic_id);
+      const title = `Order ${ord.invoice_number} scheduled for delivery${scheduled_date ? ' · ' + scheduled_date : ''}`;
+      for (const uid of recips) {
+        if (uid === req.user.id) continue;
+        await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [uuidv4(), uid, 'order_stage_entered', title, `By ${req.user.name}`, order_id]);
+      }
+    }
   });
 
   res.status(201).json({ id });

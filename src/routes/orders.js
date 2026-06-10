@@ -85,7 +85,9 @@ async function notifyOrderRouters(q, { orderId, title, message, excludeUserId })
 // move (not just the PIC), so whoever owns that stage knows work has arrived.
 const STAGE_TEAM = {
   production: ['production_lead', 'production_staff'],
-  packing: ['packing_staff'],
+  // production_lead leads packing too (has packing progress rights), so she's on the
+  // packing team — notified on →Packing and on packing-stage amends/flags, like Production.
+  packing: ['production_lead', 'packing_staff'],
   ready_for_delivery: ['delivery_team'],
 };
 const STAGE_NAME = {
@@ -93,6 +95,24 @@ const STAGE_NAME = {
   ready_for_delivery: 'Ready for Delivery', delivered: 'Delivered', cancelled: 'Cancelled', on_hold: 'On hold',
 };
 const stageName = (s) => STAGE_NAME[s] || s;
+
+// Ping the people responsible for an order RIGHT NOW — its PIC plus the team that
+// works its current stage — for in-place changes (line amend, priority/urgent) the
+// builders must see. Distinct from notifyOrderRouters, which targets the routers.
+async function notifyOwners(q, { order, title, message, excludeUserId, type = 'order_stage_entered' }) {
+  const recips = new Set();
+  if (order.pic_id) recips.add(order.pic_id);
+  const teamRoles = STAGE_TEAM[order.stage];
+  if (teamRoles) {
+    for (const u of (await q("SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true", [teamRoles])).rows) {
+      recips.add(u.id);
+    }
+  }
+  for (const uid of recips) {
+    if (uid === excludeUserId) continue;
+    await notify(q, { userId: uid, type, title, message, orderId: order.id });
+  }
+}
 
 // Self-migration: ensure the per-SKU "made" tracking columns exist (runs once
 // per process; ADD COLUMN IF NOT EXISTS is idempotent and cheap on a no-op).
@@ -432,6 +452,40 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'order_edited',
     details: `Fields updated: ${fields.filter(f => req.body[f] !== undefined).join(', ')}`, ipAddress: req.ip });
 
+  // The rush flag and customer tier pace the floor's work — ping the owner + current
+  // stage team when either actually changes. Quiet field-only edits (notes/dates) stay quiet.
+  const priChanged = req.body.priority !== undefined && req.body.priority !== order.priority;
+  const impChanged = req.body.importance !== undefined && req.body.importance !== order.importance;
+  if (priChanged || impChanged) {
+    const urgent = priChanged && req.body.priority === 'urgent';
+    const title = urgent
+      ? `Order ${order.invoice_number} marked URGENT`
+      : priChanged
+        ? `Order ${order.invoice_number} priority → ${req.body.priority}`
+        : `Order ${order.invoice_number} importance → ${req.body.importance}`;
+    await notifyOwners(query, { order,
+      title, message: `By ${req.user.name}`,
+      excludeUserId: req.user.id, type: urgent ? 'urgent_flag' : 'order_stage_entered' });
+  }
+
+  // pic_id can also be set through this general edit (managers), bypassing the
+  // assign-PIC button — keep parity so the new owner is always told.
+  if (req.body.pic_id !== undefined && req.body.pic_id && req.body.pic_id !== order.pic_id && req.body.pic_id !== req.user.id) {
+    await notify(query, { userId: req.body.pic_id, type: 'pic_assigned',
+      title: `You are assigned to order ${order.invoice_number}`,
+      message: `Assigned by ${req.user.name}`, orderId: order.id });
+  }
+
+  // Moving the deadline re-paces everyone building it — ping the owner + current stage team.
+  const ymd = (d) => { if (!d) return ''; const t = new Date(d); return isNaN(t) ? String(d).slice(0, 10) : t.toISOString().slice(0, 10); };
+  if (req.body.required_delivery_date !== undefined && ymd(req.body.required_delivery_date) !== ymd(order.required_delivery_date)) {
+    const fmt = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'none';
+    await notifyOwners(query, { order,
+      title: `Order ${order.invoice_number} due date → ${fmt(req.body.required_delivery_date)}`,
+      message: `Was ${fmt(order.required_delivery_date)} · by ${req.user.name}`,
+      excludeUserId: req.user.id });
+  }
+
   const updated = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   res.json(updated);
 }));
@@ -641,6 +695,24 @@ router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_co
       await notify(query, { userId: uid, type: 'order_blocked', title, message: `By ${req.user.name}`, orderId: order.id });
     }
   }
+
+  // Lifting a blocker is also news — the people who heard "blocked" (managers + PIC)
+  // and the floor that resumes the work (current stage team) need the all-clear.
+  const holdCleared = req.body.on_hold === false && order.on_hold === true;
+  const stockCleared = req.body.waiting_stock === false && order.waiting_stock === true;
+  if (holdCleared || stockCleared) {
+    const title = holdCleared
+      ? `Order ${order.invoice_number} taken off hold — work can resume`
+      : `Order ${order.invoice_number} stock is in — work can resume`;
+    const recips = new Set((await query("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id));
+    if (order.pic_id) recips.add(order.pic_id);
+    const teamRoles = STAGE_TEAM[order.stage];
+    if (teamRoles) for (const u of (await query("SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true", [teamRoles])).rows) recips.add(u.id);
+    for (const uid of recips) {
+      if (uid === req.user.id) continue;
+      await notify(query, { userId: uid, type: 'order_stage_entered', title, message: `By ${req.user.name}`, orderId: order.id });
+    }
+  }
   res.json({ message: 'Flags updated' });
 }));
 
@@ -651,7 +723,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
     'SELECT * FROM order_items WHERE id = $1 AND order_id = $2', [req.params.itemId, req.params.id]
   )).rows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  const ord = (await query('SELECT stage FROM orders WHERE id = $1', [req.params.id])).rows[0];
+  const ord = (await query('SELECT id, invoice_number, stage, pic_id FROM orders WHERE id = $1', [req.params.id])).rows[0];
 
   const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
@@ -708,6 +780,21 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
     details: progressing ? `${item.sku} — ${item.name} (${b.status})` : `${item.sku} — ${item.name}`,
     ipAddress: req.ip || null,
   });
+
+  // A line amendment (Boss/Admin correcting qty/STK/name/unit) must reach whoever is
+  // building the order — the PIC + current stage team — since they may be mid-work on
+  // the old values. Progress ticks (mark-made) stay quiet.
+  if (action === 'item_edited' && ord) {
+    const parts = [];
+    if (b.quantity !== undefined && qty !== Math.round(Number(item.quantity) || 0)) parts.push(`qty ${Math.round(item.quantity)} → ${qty}`);
+    if (b.sku !== undefined && b.sku !== item.sku) parts.push(`STK ${item.sku} → ${b.sku}`);
+    if (b.name !== undefined && b.name !== item.name) parts.push('renamed');
+    if (b.unit !== undefined && b.unit !== item.unit) parts.push(`unit → ${b.unit}`);
+    await notifyOwners(query, { order: ord,
+      title: `Order ${ord.invoice_number}: item amended`,
+      message: `${item.name} — ${parts.join(', ') || 'updated'} · by ${req.user.name}`,
+      excludeUserId: req.user.id });
+  }
   res.json({ ok: true });
 }));
 
