@@ -112,7 +112,20 @@ async function ensureOrderFlags() {
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS on_hold boolean NOT NULL DEFAULT false');
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiting_stock boolean NOT NULL DEFAULT false');
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS hold_reason text');
+  // Delivery destination on the order itself, so dispatch sees where it goes on the
+  // Ready list (the SQL Account feed sends name + phone, not an address). Optional —
+  // typed by staff, or sent by the webhook when the invoice carries a ship-to.
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text');
   _orderFlagsReady = true;
+}
+
+// Self-migration: tag attachments so proof-of-delivery photos (kind='pod') are
+// distinguishable from ordinary files. Default 'file' keeps existing rows intact.
+let _attachKindReady = false;
+async function ensureAttachmentKind() {
+  if (_attachKindReady) return;
+  await query("ALTER TABLE order_attachments ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'file'");
+  _attachKindReady = true;
 }
 
 // Self-migration: customer importance tier. Additive, so follow the
@@ -297,11 +310,12 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
   await ensureImportance();
+  await ensureOrderFlags();
 
   const {
     invoice_number, customer_name, customer_contact,
     order_date, required_delivery_date, expiry_date,
-    priority = 'normal', importance = 'standard', skip_production = false, pic_id, notes, items = []
+    priority = 'normal', importance = 'standard', skip_production = false, pic_id, notes, delivery_address, items = []
   } = req.body;
 
   if (!invoice_number || !customer_name || !required_delivery_date) {
@@ -334,13 +348,13 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     await q(`
       INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
         order_date, required_delivery_date, expiry_date, stage, priority, importance,
-        skip_production, pic_id, notes, source, created_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'manual', $14)
+        skip_production, pic_id, notes, delivery_address, source, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'manual', $15)
     `, [orderId, code, customer_name, customer_contact || null,
       order_date || new Date().toISOString().slice(0, 10),
       required_delivery_date, expiry_date || null,
       initialStage, priority, importance, Boolean(skip_production),
-      pic_id || null, notes || null, req.user.id]);
+      pic_id || null, notes || null, delivery_address || null, req.user.id]);
 
     for (const item of items) {
       await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -384,7 +398,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   }
 
   const fields = isManager
-    ? ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'importance', 'notes', 'pic_id']
+    ? ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'importance', 'notes', 'pic_id', 'delivery_address']
     : ['priority', 'importance'];
   const updates = [];
   const values = [];
@@ -663,6 +677,10 @@ router.post('/:id/attachments', authenticate, uploadSingle('file'), asyncHandler
 
   const order = (await query('SELECT id FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  await ensureAttachmentKind();
+
+  // 'pod' = proof of delivery (signed-doc / parcel photo); anything else is a plain file.
+  const kind = req.body && req.body.kind === 'pod' ? 'pod' : 'file';
 
   let storedPath, url;
   try { ({ path: storedPath, url } = await uploadBuffer(req.file, 'attachments/')); }
@@ -672,16 +690,17 @@ router.post('/:id/attachments', authenticate, uploadSingle('file'), asyncHandler
     id: uuidv4(), order_id: order.id,
     filename: storedPath, original_name: req.file.originalname,
     mime_type: req.file.mimetype, size: req.file.size,
-    uploaded_by: req.user.id
+    uploaded_by: req.user.id, kind
   };
 
   await query(`
-    INSERT INTO order_attachments (id, order_id, filename, original_name, mime_type, size, uploaded_by)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-  `, [att.id, att.order_id, att.filename, att.original_name, att.mime_type, att.size, att.uploaded_by]);
+    INSERT INTO order_attachments (id, order_id, filename, original_name, mime_type, size, uploaded_by, kind)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  `, [att.id, att.order_id, att.filename, att.original_name, att.mime_type, att.size, att.uploaded_by, att.kind]);
 
-  await logActivity(query, { orderId: order.id, userId: req.user.id, action: 'attachment_uploaded',
-    details: req.file.originalname, ipAddress: req.ip });
+  await logActivity(query, { orderId: order.id, userId: req.user.id,
+    action: kind === 'pod' ? 'pod_uploaded' : 'attachment_uploaded',
+    details: kind === 'pod' ? `Proof of delivery: ${req.file.originalname}` : req.file.originalname, ipAddress: req.ip });
 
   res.status(201).json({ ...att, url });
 }));
@@ -728,7 +747,7 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   const {
     invoice_number, customer_name, customer_contact,
     order_date, required_delivery_date, expiry_date,
-    priority, importance, po_ref, payment_terms, notes,
+    priority, importance, po_ref, payment_terms, notes, delivery_address,
     skip_production = false, items = [],
   } = req.body || {};
 
@@ -762,15 +781,15 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
     await q(`
       INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
         order_date, required_delivery_date, expiry_date, stage, priority, importance,
-        skip_production, notes, source, created_by)
+        skip_production, notes, delivery_address, source, created_by)
       VALUES ($1, $2, $3, $4,
         COALESCE($5::date, CURRENT_DATE),
         COALESCE($6::date, CURRENT_DATE + $7::int),
-        $8::date, $9, $10, $11, $12, $13, 'sql_account', $14)
+        $8::date, $9, $10, $11, $12, $13, $14, 'sql_account', $15)
     `, [orderId, invoice_number, customer_name, customer_contact || null,
       order_date || null, required_delivery_date || null, SQL_ACCOUNT_LEAD_DAYS,
       expiry_date || null, initialStage, safePriority, safeImportance,
-      Boolean(skip_production), composedNotes, systemUser.id]);
+      Boolean(skip_production), composedNotes, delivery_address || null, systemUser.id]);
 
     for (const item of items) {
       await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',

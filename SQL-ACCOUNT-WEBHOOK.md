@@ -39,6 +39,7 @@ endpoint **rejects every request** (fail-closed) — this is deliberate.
 | `invoice_number` | ✅ | Doc No. (e.g. `SI26060059`) | Unique key — a repeat is ignored (409). |
 | `customer_name` | ✅ | Billing customer | |
 | `customer_contact` | — | Tel | Used for the WhatsApp update; a mobile (60…) reaches the customer. |
+| `delivery_address` | — | Delivery / ship-to address | Shown to dispatch on the Ready-for-Delivery list. Optional — if omitted, staff type it in the app. |
 | `items[]` | — | Invoice lines | `{ sku, name, quantity, unit }` — see below. |
 | `items[].sku` | — | Item code (e.g. `STK006`) | Defaults to `N/A` if absent. |
 | `items[].name` | — | Description | Falls back to the SKU. |
@@ -63,6 +64,7 @@ endpoint **rejects every request** (fail-closed) — this is deliberate.
   "invoice_number": "SI26060059",
   "customer_name": "PERFECT DESIGN TRADING SDN BHD",
   "customer_contact": "011-10841868",
+  "delivery_address": "12 Jalan Mawar 3, Taman Sejahtera, 40000 Shah Alam, Selangor",
   "order_date": "2026-06-06",
   "po_ref": "PO-001652",
   "payment_terms": "C.O.D.",
