@@ -33,6 +33,23 @@ async function ensureDeliverySchema() {
   _delSchemaReady = true;
 }
 
+// Ping the PIC + Boss/Ops/Admin when a delivery completes or is reopened, so a
+// completion/undo isn't silent. (Notification insert is inlined here — delivery.js
+// has no access to the notify helper in orders.js.)
+async function notifyDelivered(q, orderId, actorId, actorName, kind) {
+  const ord = (await q('SELECT invoice_number, pic_id FROM orders WHERE id = $1', [orderId])).rows[0];
+  if (!ord) return;
+  const recips = (await q("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id);
+  if (ord.pic_id) recips.push(ord.pic_id);
+  const title = kind === 'reopened' ? `Order ${ord.invoice_number} reopened — back to Ready` : `Order ${ord.invoice_number} delivered`;
+  const type = kind === 'reopened' ? 'order_reopened' : 'order_delivered';
+  for (const uid of [...new Set(recips)]) {
+    if (uid === actorId) continue;
+    await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [uuidv4(), uid, type, title, `By ${actorName}`, orderId]);
+  }
+}
+
 // Production-floor roles must not see the customer — mirror the scrub in orders.js.
 const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_staff'];
 
@@ -130,6 +147,7 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
       [uuidv4(), delivery.order_id, req.user.id, 'Marked delivered']);
+    await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'delivered');
   });
 
   res.json({ message: 'Marked as delivered' });
@@ -163,6 +181,7 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
       [uuidv4(), order_id, req.user.id, 'Marked delivered (one-tap)']);
+    await notifyDelivered(q, order_id, req.user.id, req.user.name, 'delivered');
   });
 
   res.json({ message: 'Marked as delivered' });
@@ -188,6 +207,7 @@ router.post('/:id/reopen', authenticate, asyncHandler(async (req, res) => {
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_reopened', $4)`,
       [uuidv4(), delivery.order_id, req.user.id, 'Reopened — order returned to Ready for Delivery']);
+    await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'reopened');
   });
 
   res.json({ message: 'Reopened' });

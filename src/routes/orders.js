@@ -81,6 +81,19 @@ async function notifyOrderRouters(q, { orderId, title, message, excludeUserId })
   }
 }
 
+// Which roles work each stage — used to ping the destination stage's team on a
+// move (not just the PIC), so whoever owns that stage knows work has arrived.
+const STAGE_TEAM = {
+  production: ['production_lead', 'production_staff'],
+  packing: ['packing_staff'],
+  ready_for_delivery: ['delivery_team'],
+};
+const STAGE_NAME = {
+  order: 'Order', production: 'Production', packing: 'Packing',
+  ready_for_delivery: 'Ready for Delivery', delivered: 'Delivered', cancelled: 'Cancelled', on_hold: 'On hold',
+};
+const stageName = (s) => STAGE_NAME[s] || s;
+
 // Self-migration: ensure the per-SKU "made" tracking columns exist (runs once
 // per process; ADD COLUMN IF NOT EXISTS is idempotent and cheap on a no-op).
 let _itemColsReady = false;
@@ -461,18 +474,33 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
       details: `${fromStage} → ${to_stage}${reason ? ': ' + reason : ''}`,
       oldValue: fromStage, newValue: to_stage, ipAddress: req.ip });
 
-    // Notify PIC
+    // Notify the PIC of any move.
     if (order.pic_id && order.pic_id !== req.user.id) {
       await notify(q, {
         userId: order.pic_id, type: 'order_stage_entered',
-        title: `Order ${order.invoice_number} moved to ${to_stage}`,
+        title: `Order ${order.invoice_number} moved to ${stageName(to_stage)}`,
         message: `Moved by ${req.user.name}`,
         orderId: order.id
       });
     }
 
-    // Back-office Admins get ONE high-signal ping — when an order becomes ready to ship —
-    // not on every intermediate production/packing move (that flooded the bell).
+    // Notify the team that OWNS the destination stage, so whoever works it knows an
+    // order just entered — not only the PIC. One ping to a small team (no flooding).
+    const teamRoles = STAGE_TEAM[to_stage];
+    if (teamRoles) {
+      const team = (await q("SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true", [teamRoles])).rows;
+      for (const u of team) {
+        if (u.id === req.user.id || u.id === order.pic_id) continue;
+        await notify(q, {
+          userId: u.id, type: 'order_stage_entered',
+          title: `Order ${order.invoice_number} is now in ${stageName(to_stage)}`,
+          message: `Moved by ${req.user.name}`,
+          orderId: order.id
+        });
+      }
+    }
+
+    // Back-office Admins get ONE high-signal ping when an order becomes ready to ship.
     if (to_stage === 'ready_for_delivery') {
       const admins = (await q("SELECT id FROM users WHERE role = 'admin' AND is_active = true")).rows;
       for (const a of admins) {
@@ -484,6 +512,16 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
           orderId: order.id
         });
       }
+    }
+
+    // A cancellation is significant — tell Boss/Ops/Admin beyond the PIC's move ping.
+    if (to_stage === 'cancelled') {
+      await notifyOrderRouters(q, {
+        orderId: order.id,
+        title: `Order ${order.invoice_number} was cancelled`,
+        message: `Cancelled by ${req.user.name}`,
+        excludeUserId: req.user.id,
+      });
     }
   });
 
@@ -589,6 +627,20 @@ router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_co
     orderId: req.params.id, userId: req.user.id, action: 'order_flagged',
     details: `${order.invoice_number}: ${acts.join(', ')}`, ipAddress: req.ip || null,
   });
+
+  // A blocker shouldn't sit silently — ping the PIC + Boss/Ops/Admin when an order
+  // is put on hold or flagged waiting-stock. Clearing a flag doesn't notify.
+  if (req.body.on_hold === true || req.body.waiting_stock === true) {
+    const title = req.body.on_hold === true
+      ? `Order ${order.invoice_number} put on hold${req.body.reason ? ': ' + req.body.reason : ''}`
+      : `Order ${order.invoice_number} is waiting on stock`;
+    const recips = (await query("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id);
+    if (order.pic_id) recips.push(order.pic_id);
+    for (const uid of [...new Set(recips)]) {
+      if (uid === req.user.id) continue;
+      await notify(query, { userId: uid, type: 'order_blocked', title, message: `By ${req.user.name}`, orderId: order.id });
+    }
+  }
   res.json({ message: 'Flags updated' });
 }));
 
