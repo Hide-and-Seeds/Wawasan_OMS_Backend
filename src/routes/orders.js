@@ -59,11 +59,15 @@ function logActivity(q, { orderId, userId, action, details, oldValue, newValue, 
 }
 
 // Helper: create notification
-function notify(q, { userId, type, title, message, orderId }) {
+// `loud` (default true) decides whether the frontend pops a toast for this event.
+// Loud = something the recipient must act on (work arrived, item amended, urgent,
+// hold, assigned). Quiet (loud:false) still lands in the bell + card glow, but no
+// toast — for manager bookkeeping (date/tier tweaks, delivery scheduled/done, all-clears).
+function notify(q, { userId, type, title, message, orderId, loud = true }) {
   return q(
-    `INSERT INTO notifications (id, user_id, type, title, message, order_id)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [uuidv4(), userId, type, title, message || null, orderId || null]
+    `INSERT INTO notifications (id, user_id, type, title, message, order_id, loud)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [uuidv4(), userId, type, title, message || null, orderId || null, loud]
   );
 }
 
@@ -99,7 +103,7 @@ const stageName = (s) => STAGE_NAME[s] || s;
 // Ping the people responsible for an order RIGHT NOW — its PIC plus the team that
 // works its current stage — for in-place changes (line amend, priority/urgent) the
 // builders must see. Distinct from notifyOrderRouters, which targets the routers.
-async function notifyOwners(q, { order, title, message, excludeUserId, type = 'order_stage_entered' }) {
+async function notifyOwners(q, { order, title, message, excludeUserId, type = 'order_stage_entered', loud = true }) {
   const recips = new Set();
   if (order.pic_id) recips.add(order.pic_id);
   const teamRoles = STAGE_TEAM[order.stage];
@@ -110,7 +114,7 @@ async function notifyOwners(q, { order, title, message, excludeUserId, type = 'o
   }
   for (const uid of recips) {
     if (uid === excludeUserId) continue;
-    await notify(q, { userId: uid, type, title, message, orderId: order.id });
+    await notify(q, { userId: uid, type, title, message, orderId: order.id, loud });
   }
 }
 
@@ -465,7 +469,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
         : `Order ${order.invoice_number} importance → ${req.body.importance}`;
     await notifyOwners(query, { order,
       title, message: `By ${req.user.name}`,
-      excludeUserId: req.user.id, type: urgent ? 'urgent_flag' : 'order_stage_entered' });
+      excludeUserId: req.user.id, type: urgent ? 'urgent_flag' : 'order_stage_entered', loud: urgent });
   }
 
   // pic_id can also be set through this general edit (managers), bypassing the
@@ -483,7 +487,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
     await notifyOwners(query, { order,
       title: `Order ${order.invoice_number} due date → ${fmt(req.body.required_delivery_date)}`,
       message: `Was ${fmt(order.required_delivery_date)} · by ${req.user.name}`,
-      excludeUserId: req.user.id });
+      excludeUserId: req.user.id, loud: false });
   }
 
   const updated = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
@@ -717,7 +721,7 @@ router.patch('/:id/flags', authenticate, authorize('super_admin', 'production_le
     if (teamRoles) for (const u of (await query("SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true", [teamRoles])).rows) recips.add(u.id);
     for (const uid of recips) {
       if (uid === req.user.id) continue;
-      await notify(query, { userId: uid, type: 'order_stage_entered', title, message: `By ${req.user.name}`, orderId: order.id });
+      await notify(query, { userId: uid, type: 'order_stage_entered', title, message: `By ${req.user.name}`, orderId: order.id, loud: false });
     }
   }
   res.json({ message: 'Flags updated' });

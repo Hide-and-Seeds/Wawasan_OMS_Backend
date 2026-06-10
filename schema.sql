@@ -164,6 +164,10 @@ create table if not exists notifications (
   message    text,
   order_id   uuid references orders(id) on delete set null,
   is_read    boolean not null default false,
+  -- loud = whether the UI pops a toast (true) or just lands in the bell quietly (false).
+  -- Loud: work arrived / item amended / urgent / hold / assigned. Quiet: date+tier
+  -- tweaks, delivery scheduled/done, all-clears — they still show in the bell + glow.
+  loud       boolean not null default true,
   created_at timestamptz not null default now()
 );
 

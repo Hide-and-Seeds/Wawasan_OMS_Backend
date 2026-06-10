@@ -48,10 +48,12 @@ async function notifyDelivered(q, orderId, actorId, actorName, kind, noProof = f
     : `Order ${ord.invoice_number} delivered`;
   const type = reopened ? 'order_reopened' : 'order_delivered';
   const message = (!reopened && noProof) ? `By ${actorName} · no proof of delivery attached — please verify` : `By ${actorName}`;
+  // A normal delivered update is quiet (informational); a no-proof delivery and a reopen are loud.
+  const loud = reopened ? true : noProof;
   for (const uid of [...new Set(recips)]) {
     if (uid === actorId) continue;
-    await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [uuidv4(), uid, type, title, message, orderId]);
+    await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id, loud) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [uuidv4(), uid, type, title, message, orderId, loud]);
   }
 }
 
@@ -130,8 +132,8 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
       const title = `Order ${ord.invoice_number} scheduled for delivery${scheduled_date ? ' · ' + scheduled_date : ''}`;
       for (const uid of recips) {
         if (uid === req.user.id) continue;
-        await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [uuidv4(), uid, 'order_stage_entered', title, `By ${req.user.name}`, order_id]);
+        await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id, loud) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [uuidv4(), uid, 'order_stage_entered', title, `By ${req.user.name}`, order_id, false]);
       }
     }
   });
