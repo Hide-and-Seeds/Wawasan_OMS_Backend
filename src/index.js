@@ -76,7 +76,7 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════╗
-║   Wawasan Candle OMS — Backend API       ║
+║   Wawasan LTS OMS — Backend API          ║
 ║   Running on http://localhost:${PORT}       ║
 ╚══════════════════════════════════════════╝
 

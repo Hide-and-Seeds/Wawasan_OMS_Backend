@@ -25,7 +25,7 @@ async function orderConfirmationMedia(orderId) {
   let y = 792;
   const draw = (s, x, size, f = font, col = dark) => page.drawText(String(s == null ? '' : s), { x, y, size, font: f, color: col });
 
-  draw('WAWASAN CANDLE', L, 22, bold, orange);
+  draw('WAWASAN LTS TRADING SDN BHD', L, 18, bold, orange);
   y -= 18; draw('Order Confirmation', L, 12, font, grey);
   y -= 32;
   draw(`Invoice ${order.invoice_number}`, L, 13, bold);
@@ -46,7 +46,7 @@ async function orderConfirmationMedia(orderId) {
   }
   y = Math.max(y - 22, 60);
   draw('This is an order confirmation, not a tax invoice.', L, 9, font, grey);
-  y -= 13; draw('Thank you for choosing Wawasan Candle.', L, 9, font, grey);
+  y -= 13; draw('Thank you for choosing Wawasan LTS.', L, 9, font, grey);
 
   const bytes = await pdf.save();
   return { data: Buffer.from(bytes).toString('base64'), mimetype: 'application/pdf', filename: `Order-${order.invoice_number}.pdf` };

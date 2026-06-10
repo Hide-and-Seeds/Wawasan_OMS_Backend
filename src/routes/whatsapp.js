@@ -12,7 +12,7 @@ const { sendMessage, providerName, toMsisdn, POLICY, withinWindow, localDate } =
 const { orderConfirmationMedia } = require('../lib/orderPdf');
 
 const ADMIN_ROLES = ['super_admin'];
-const BRAND = 'Wawasan Candle';
+const BRAND = 'Wawasan LTS';
 
 // ── self-migrating table (idempotent, runs once per process) ────────────────
 let _ready = false;
