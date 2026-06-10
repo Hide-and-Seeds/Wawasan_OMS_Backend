@@ -69,11 +69,11 @@ function notify(q, { userId, type, title, message, orderId }) {
 
 // Helper: ping everyone who routes a new order (assigns PIC / sets priority).
 // One role list, shared by the manual-create and SQL-Account-webhook paths so the
-// two can't drift. production_lead is included — the floor lead (Renee) needs to
-// know a new order landed; operations_controller is currently empty but harmless.
+// two can't drift. production_lead is included — the floor lead (Reenee) needs to
+// know a new order landed.
 async function notifyOrderRouters(q, { orderId, title, message, excludeUserId }) {
   const routers = (await q(
-    "SELECT id FROM users WHERE role IN ('operations_controller','super_admin','admin','production_lead') AND is_active = true"
+    "SELECT id FROM users WHERE role IN ('super_admin','admin','production_lead') AND is_active = true"
   )).rows;
   for (const u of routers) {
     if (u.id === excludeUserId) continue;
@@ -338,7 +338,7 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/orders — create order
 router.post('/', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller'];
+  const allowed = ['super_admin'];
   if (!allowed.includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
@@ -414,7 +414,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
 // PATCH /api/orders/:id — edit order details
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
-  const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
+  const isManager = ['super_admin'].includes(req.user.role);
   // Back-office Admin (deputy) may triage routing — priority / importance only.
   // Customer details, dates and notes stay Boss/Ops; PIC is set via assign-pic.
   const isAdmin = req.user.role === 'admin';
@@ -504,7 +504,7 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   const fromStage = order.stage;
 
   // Managers move freely; stage staff may only advance their own stage forward one step.
-  if (!['super_admin', 'operations_controller'].includes(req.user.role)) {
+  if (!['super_admin'].includes(req.user.role)) {
     if (order.on_hold) return res.status(403).json({ error: 'Order is on hold' });
     const owners = STAGE_OWNERS[fromStage] || [];
     const forwardOk = owners.includes(req.user.role) && to_stage === FORWARD_STAGE[fromStage];
@@ -593,7 +593,7 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
 router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
   // Boss, Ops, or back-office Admin (deputy) may set the PIC. (Not canMoveOrders —
   // that gate also guards order delete, which Admin must NOT have.)
-  if (!['super_admin', 'operations_controller', 'admin'].includes(req.user.role)) {
+  if (!['super_admin', 'admin'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
   const { pic_id } = req.body;
@@ -631,7 +631,7 @@ router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
 // Shared: the chosen order persists for everyone who views the board. Drives the
 // Production column today. Boss/Admin/Ops/Production Lead only. Single segment so it
 // can't be captured by the POST /:id/* routes.
-router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'operations_controller', 'production_lead'), asyncHandler(async (req, res) => {
+router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'production_lead'), asyncHandler(async (req, res) => {
   await ensureSortOrder();
   await ensureImportance();
   const { stage, ordered_ids, set_importance } = req.body || {};
@@ -661,7 +661,7 @@ router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'operati
 }));
 
 // PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags
-router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_controller', 'production_lead'), asyncHandler(async (req, res) => {
+router.patch('/:id/flags', authenticate, authorize('super_admin', 'production_lead'), asyncHandler(async (req, res) => {
   await ensureOrderFlags();
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -695,7 +695,7 @@ router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_co
     const title = req.body.on_hold === true
       ? `Order ${order.invoice_number} put on hold${req.body.reason ? ': ' + req.body.reason : ''}`
       : `Order ${order.invoice_number} is waiting on stock`;
-    const recips = (await query("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id);
+    const recips = (await query("SELECT id FROM users WHERE role IN ('super_admin','admin') AND is_active = true")).rows.map((r) => r.id);
     if (order.pic_id) recips.push(order.pic_id);
     for (const uid of [...new Set(recips)]) {
       if (uid === req.user.id) continue;
@@ -711,7 +711,7 @@ router.patch('/:id/flags', authenticate, authorize('super_admin', 'operations_co
     const title = holdCleared
       ? `Order ${order.invoice_number} taken off hold — work can resume`
       : `Order ${order.invoice_number} stock is in — work can resume`;
-    const recips = new Set((await query("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id));
+    const recips = new Set((await query("SELECT id FROM users WHERE role IN ('super_admin','admin') AND is_active = true")).rows.map((r) => r.id));
     if (order.pic_id) recips.add(order.pic_id);
     const teamRoles = STAGE_TEAM[order.stage];
     if (teamRoles) for (const u of (await query("SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true", [teamRoles])).rows) recips.add(u.id);
@@ -732,7 +732,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const ord = (await query('SELECT id, invoice_number, stage, pic_id FROM orders WHERE id = $1', [req.params.id])).rows[0];
 
-  const isManager = ['super_admin', 'operations_controller'].includes(req.user.role);
+  const isManager = ['super_admin'].includes(req.user.role);
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
   // Boss + back-office Admin may amend a placed line (correct a wrong STK / qty / unit).
   // Adding or removing whole lines stays locked (POST/DELETE below) — those must match

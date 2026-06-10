@@ -39,7 +39,7 @@ async function ensureDeliverySchema() {
 async function notifyDelivered(q, orderId, actorId, actorName, kind, noProof = false) {
   const ord = (await q('SELECT invoice_number, pic_id FROM orders WHERE id = $1', [orderId])).rows[0];
   if (!ord) return;
-  const recips = (await q("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id);
+  const recips = (await q("SELECT id FROM users WHERE role IN ('super_admin','admin') AND is_active = true")).rows.map((r) => r.id);
   if (ord.pic_id) recips.push(ord.pic_id);
   const reopened = kind === 'reopened';
   // A delivery with no proof attached is pushed to Boss/Ops/Admin with a ⚠ so it's
@@ -96,7 +96,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/delivery — assign delivery
 router.post('/', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
+  const allowed = ['super_admin', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
@@ -126,7 +126,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     // Dispatch usually books this — tell the PIC + managers the order now has a slot.
     const ord = (await q('SELECT invoice_number, pic_id FROM orders WHERE id = $1', [order_id])).rows[0];
     if (ord) {
-      const recips = new Set((await q("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id));
+      const recips = new Set((await q("SELECT id FROM users WHERE role IN ('super_admin','admin') AND is_active = true")).rows.map((r) => r.id));
       if (ord.pic_id) recips.add(ord.pic_id);
       const title = `Order ${ord.invoice_number} scheduled for delivery${scheduled_date ? ' · ' + scheduled_date : ''}`;
       for (const uid of recips) {
@@ -148,7 +148,7 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
   if (delivery.status === 'delivered') return res.status(409).json({ error: 'This delivery is already completed' });
 
   // Boss, Ops, or the Delivery Coordinator may mark a delivery complete.
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
+  const allowed = ['super_admin', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
 
   // Proof gate: a completed delivery needs a POD photo on the order, unless the
@@ -198,7 +198,7 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
 // else creates a delivery already marked delivered (carrying the order's address).
 // Same end state as Schedule → Mark delivered, so reports/audit are unchanged.
 router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
+  const allowed = ['super_admin', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
@@ -247,7 +247,7 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
 // Ready for Delivery. Removes the delivery record and the (mistaken) delivered
 // transition so throughput/cycle reports stay clean; the reversal is logged.
 router.post('/:id/reopen', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
+  const allowed = ['super_admin', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
 
   const delivery = (await query('SELECT * FROM deliveries WHERE id = $1', [req.params.id])).rows[0];
@@ -271,7 +271,7 @@ router.post('/:id/reopen', authenticate, asyncHandler(async (req, res) => {
 
 // PATCH /api/delivery/:id — update a scheduled delivery, or cancel it (status: 'failed')
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
+  const allowed = ['super_admin', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
@@ -312,7 +312,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── Deliverers (no-login driver list, managed by Boss / Ops / Coordinator) ───
-const DELIVERER_MANAGERS = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
+const DELIVERER_MANAGERS = ['super_admin', 'delivery_team', 'admin'];
 
 // GET /api/delivery/deliverers — list (any authenticated user who can reach Delivery)
 router.get('/deliverers', authenticate, asyncHandler(async (req, res) => {

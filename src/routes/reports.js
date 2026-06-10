@@ -5,16 +5,16 @@ const { query } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-const ADMIN_ROLES = ['super_admin', 'operations_controller'];
+const ADMIN_ROLES = ['super_admin'];
 // Back-office Admin (deputy) gets the read-only Dashboard overview — but NOT the
-// detailed Reports tabs (those stay Boss/Ops/Lead).
-const DASHBOARD_ROLES = ['super_admin', 'operations_controller', 'admin'];
+// detailed Reports tabs (those stay Boss / Lead).
+const DASHBOARD_ROLES = ['super_admin', 'admin'];
 // Production Lead (floor supervisor) may see the name-free reports: production,
 // packing, and the per-person staff / person-in-charge tables. Orders and the
-// dashboard stay Boss/Ops only — they list customer names. Delivery is the
+// dashboard stay Boss only — they list customer names. Delivery is the
 // coordinator's domain, not the lead's.
-const PROD_REPORT_ROLES = ['super_admin', 'operations_controller', 'production_lead'];
-const DELIVERY_REPORT_ROLES = ['super_admin', 'operations_controller'];
+const PROD_REPORT_ROLES = ['super_admin', 'production_lead'];
+const DELIVERY_REPORT_ROLES = ['super_admin'];
 
 // GET /api/reports/dashboard — boss overview
 router.get('/dashboard', authenticate, authorize(...DASHBOARD_ROLES), asyncHandler(async (req, res) => {
@@ -534,7 +534,7 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
   else stF = "AND date_trunc('week', st.created_at) = date_trunc('week', now())";
 
   // Roles that can hold orders as PIC — keeps zero-load assignees visible in the table.
-  const picRoles = ['operations_controller', 'production_lead', 'production_staff', 'packing_staff', 'delivery_team'];
+  const picRoles = ['production_lead', 'production_staff', 'packing_staff', 'delivery_team'];
   // Production Lead is scoped to the make + pack team (no delivery dispatcher / ops).
   const teamRoles = ['production_lead', 'production_staff', 'packing_staff'];
   const leadFilter = req.user.role === 'production_lead'

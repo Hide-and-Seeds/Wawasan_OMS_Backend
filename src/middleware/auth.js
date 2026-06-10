@@ -44,9 +44,9 @@ function authorize(...roles) {
 }
 
 function canMoveOrders(req, res, next) {
-  const allowed = ['super_admin', 'operations_controller'];
+  const allowed = ['super_admin'];
   if (!allowed.includes(req.user.role)) {
-    return res.status(403).json({ error: 'Only Operations Controller or Admin can move orders' });
+    return res.status(403).json({ error: 'Only the Boss can move orders' });
   }
   next();
 }

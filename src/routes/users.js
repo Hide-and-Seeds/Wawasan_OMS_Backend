@@ -7,9 +7,9 @@ const { query } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-// Reading the staff list stays open to Ops too — they need it for the PIC picker
-// and the workload view. Managing ACCOUNTS, however, is Admin-only.
-const USER_VIEWERS = ['super_admin', 'admin', 'operations_controller'];
+// Reading the staff list (PIC picker + workload) and managing accounts are both
+// Boss + Office Admin now — the Ops viewer tier was retired in the role reshuffle.
+const USER_VIEWERS = ['super_admin', 'admin'];
 // Create / reset password / enable-disable / delete — Boss + Office Admin only.
 const USER_MANAGERS = ['super_admin', 'admin'];
 

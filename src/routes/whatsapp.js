@@ -11,7 +11,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { sendMessage, providerName, toMsisdn, POLICY, withinWindow, localDate } = require('../lib/whatsapp');
 const { orderConfirmationMedia } = require('../lib/orderPdf');
 
-const ADMIN_ROLES = ['super_admin', 'operations_controller'];
+const ADMIN_ROLES = ['super_admin'];
 const BRAND = 'Wawasan Candle';
 
 // ── self-migrating table (idempotent, runs once per process) ────────────────
