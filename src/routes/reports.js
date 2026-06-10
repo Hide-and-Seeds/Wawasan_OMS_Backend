@@ -406,6 +406,122 @@ router.get('/staff', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler
   res.json({ staff });
 }));
 
+// GET /api/reports/staff/:id — deep drill-down for ONE person: volume, speed and
+// reliability, each benchmarked against the team average, plus a recent-activity
+// feed. Same audience as /staff (Boss/Ops/Lead); a Production Lead may only open
+// someone on the make+pack team. All numbers come from existing tables — no money.
+router.get('/staff/:id', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { period = 'weekly', from, to } = req.query;
+
+  const u = (await query('SELECT id, name, role, avatar_color FROM users WHERE id = $1', [id])).rows[0];
+  if (!u) return res.status(404).json({ error: 'Staff not found' });
+  const teamRoles = ['production_lead', 'production_staff', 'packing_staff'];
+  if (req.user.role === 'production_lead' && !teamRoles.includes(u.role)) {
+    return res.status(403).json({ error: 'Outside your team' });
+  }
+
+  // Period window for any timestamp column. Every query below is called with
+  // [id, ...dParams], so from/to are always $2/$3 (id is $1, ignored where unused).
+  const win = (col) => {
+    if (from && to) return `AND ${col} BETWEEN $2 AND $3`;
+    if (period === 'daily') return `AND ${col}::date = CURRENT_DATE`;
+    if (period === 'monthly') return `AND date_trunc('month', ${col}) = date_trunc('month', now())`;
+    return `AND date_trunc('week', ${col}) = date_trunc('week', now())`;
+  };
+  const dParams = (from && to) ? [from, to] : [];
+  const P = [id, ...dParams];
+  const stF = win('st.created_at'), madeF = win('oi.made_at'), packF = win('oi.pack_made_at');
+
+  // Stage work, split by step, plus reworks (sent back) and distinct active days.
+  const work = (await query(`
+    SELECT
+      SUM(CASE WHEN ${FORWARD_PAIRS} THEN 1 ELSE 0 END)::int AS completions,
+      SUM(CASE WHEN st.from_stage='order' AND st.to_stage='production' THEN 1 ELSE 0 END)::int AS routed,
+      SUM(CASE WHEN st.from_stage='production' AND st.to_stage='packing' THEN 1 ELSE 0 END)::int AS produced,
+      SUM(CASE WHEN st.from_stage='packing' AND st.to_stage='ready_for_delivery' THEN 1 ELSE 0 END)::int AS packed_moves,
+      SUM(CASE WHEN st.from_stage='ready_for_delivery' AND st.to_stage='delivered' THEN 1 ELSE 0 END)::int AS delivered_moves,
+      SUM(CASE WHEN st.from_stage='packing' AND st.to_stage='production' THEN 1 ELSE 0 END)::int AS reworks,
+      COUNT(DISTINCT st.created_at::date)::int AS active_days
+    FROM stage_transitions st
+    WHERE st.transitioned_by = $1 ${stF}
+  `, P)).rows[0];
+
+  const items_made = (await query(
+    `SELECT COUNT(*)::int AS n FROM order_items oi WHERE oi.made_by = $1 AND oi.status = 'done' ${madeF}`, P
+  )).rows[0].n;
+  const items_packed = (await query(
+    `SELECT COUNT(*)::int AS n FROM order_items oi WHERE oi.pack_made_by = $1 AND oi.pack_status = 'done' ${packF}`, P
+  )).rows[0].n;
+  const amendments = (await query(
+    `SELECT COUNT(*)::int AS n FROM activity_log WHERE user_id = $1 AND action = 'order_edited' ${win('created_at')}`, P
+  )).rows[0].n;
+
+  // Live PIC workload (not period-bound) + on-time rate for their delivered orders.
+  const workload = (await query(`
+    SELECT
+      COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled'))::int AS active,
+      COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND required_delivery_date < CURRENT_DATE)::int AS overdue,
+      COUNT(*) FILTER (WHERE on_hold)::int AS on_hold
+    FROM orders WHERE pic_id = $1
+  `, [id])).rows[0];
+  const ot = (await query(`
+    SELECT COUNT(*)::int AS total,
+      SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
+    FROM deliveries d JOIN orders o ON o.id = d.order_id
+    WHERE o.pic_id = $1 AND d.status = 'delivered' ${win('d.delivered_at')}
+  `, P)).rows[0];
+
+  // 14-day completion trend (sparkline) and the recent-activity feed.
+  const trend = (await query(`
+    SELECT st.created_at::date AS date, COUNT(*)::int AS count
+    FROM stage_transitions st
+    WHERE st.transitioned_by = $1 AND ${FORWARD_PAIRS} AND st.created_at >= CURRENT_DATE - INTERVAL '13 days'
+    GROUP BY st.created_at::date ORDER BY date ASC
+  `, [id])).rows;
+  const activity = (await query(`
+    SELECT al.action, al.details, al.created_at, o.invoice_number
+    FROM activity_log al LEFT JOIN orders o ON o.id = al.order_id
+    WHERE al.user_id = $1 ORDER BY al.created_at DESC LIMIT 15
+  `, [id])).rows;
+
+  // Team benchmark: average completions + items per active person this period.
+  const bench = (await query(`
+    WITH per AS (
+      SELECT u.id,
+        COALESCE((SELECT COUNT(*) FROM stage_transitions st WHERE st.transitioned_by = u.id AND ${FORWARD_PAIRS} ${stF}), 0)::int AS completions,
+        COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.made_by = u.id AND oi.status = 'done' ${madeF}), 0)::int
+          + COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.pack_made_by = u.id AND oi.pack_status = 'done' ${packF}), 0)::int AS items
+      FROM users u WHERE u.is_active = true
+    )
+    SELECT COALESCE(ROUND(AVG(completions), 1), 0) AS avg_completions,
+           COALESCE(ROUND(AVG(items), 1), 0) AS avg_items
+    FROM per WHERE completions > 0 OR items > 0
+  `, P)).rows[0];
+
+  const items_total = items_made + items_packed;
+  const per_active_day = work.active_days > 0 ? +(items_total / work.active_days).toFixed(1) : 0;
+
+  res.json({
+    staff: { id: u.id, name: u.name, role: u.role, avatar_color: u.avatar_color },
+    period,
+    volume: {
+      completions: work.completions, items_made, items_packed, items_total,
+      breakdown: { routed: work.routed, produced: work.produced, packed: work.packed_moves, delivered: work.delivered_moves }
+    },
+    speed: { active_days: work.active_days, items_per_active_day: per_active_day },
+    reliability: {
+      reworks: work.reworks, amendments,
+      on_time_total: ot.total, on_time_count: ot.on_time || 0,
+      on_time_rate: ot.total > 0 ? +(((ot.on_time || 0) / ot.total) * 100).toFixed(1) : null
+    },
+    workload,
+    benchmark: { avg_completions: Number(bench.avg_completions), avg_items: Number(bench.avg_items) },
+    trend,
+    activity
+  });
+}));
+
 // GET /api/reports/pic — per-person-in-charge view: current open workload
 // (active / overdue / on-hold, live) plus orders completed in the period. Boss/Ops + Production Lead (no customer names).
 router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
