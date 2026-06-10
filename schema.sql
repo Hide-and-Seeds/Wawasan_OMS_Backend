@@ -21,7 +21,7 @@ create table if not exists users (
   email        text unique not null,
   password     text not null,
   role         text not null check (role in (
-    'super_admin','admin','operations_controller','production_lead',
+    'super_admin','admin','production_lead',
     'production_staff','packing_staff','delivery_team'
   )),
   avatar_color text default '#3B82F6',

@@ -26,7 +26,6 @@ async function ensureDeliverySchema() {
     created_at timestamptz not null default now()
   )`);
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliverer_id uuid REFERENCES deliverers(id)');
-  await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tracking_no text');
   // Proof-of-delivery photos live on the order as attachments tagged kind='pod';
   // ensure the tag column exists so the has_pod flag below can read it.
   await query("ALTER TABLE order_attachments ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'file'");
@@ -100,7 +99,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
-  const { order_id, deliverer_id, scheduled_date, address, notes, tracking_no } = req.body;
+  const { order_id, deliverer_id, scheduled_date, address, notes } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
 
   const order = (await query("SELECT id, delivery_address FROM orders WHERE id = $1 AND stage = 'ready_for_delivery'", [order_id])).rows[0];
@@ -115,9 +114,9 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   const id = uuidv4();
   await withTransaction(async (q) => {
     await q(`
-      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes, tracking_no)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `, [id, order_id, deliverer_id || null, scheduled_date || null, address || order.delivery_address || null, notes || null, tracking_no || null]);
+      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [id, order_id, deliverer_id || null, scheduled_date || null, address || order.delivery_address || null, notes || null]);
 
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_scheduled', $4)`,
@@ -279,7 +278,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   if (!delivery) return res.status(404).json({ error: 'Delivery not found' });
   if (delivery.status === 'delivered') return res.status(409).json({ error: 'A completed delivery cannot be changed' });
 
-  const { deliverer_id, scheduled_date, address, notes, tracking_no, status } = req.body;
+  const { deliverer_id, scheduled_date, address, notes, status } = req.body;
   if (deliverer_id) {
     const dl = (await query('SELECT id, is_active FROM deliverers WHERE id = $1', [deliverer_id])).rows[0];
     if (!dl || !dl.is_active) return res.status(400).json({ error: 'Deliverer must be active' });
@@ -293,7 +292,6 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   if (scheduled_date !== undefined) sets.push(`scheduled_date = $${vals.push(scheduled_date || null)}`);
   if (address !== undefined) sets.push(`address = $${vals.push(address || null)}`);
   if (notes !== undefined) sets.push(`notes = $${vals.push(notes || null)}`);
-  if (tracking_no !== undefined) sets.push(`tracking_no = $${vals.push(tracking_no || null)}`);
   if (status !== undefined) sets.push(`status = $${vals.push(status)}`);
   if (sets.length === 0) return res.status(400).json({ error: 'Nothing to update' });
   sets.push('updated_at = now()');
