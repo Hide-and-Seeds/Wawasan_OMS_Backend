@@ -726,4 +726,179 @@ router.get('/audit', authenticate, authorize('super_admin', 'admin'), asyncHandl
   res.json({ logs, total, page: parseInt(page) });
 }));
 
+// ─── Reward scorecard / leaderboard ──────────────────────────────────────────
+// Composite 0–100 score per department or per person, for the monthly reward
+// engine + the floor leaderboard. Four pillars — On-time, Output, Quality, Speed —
+// each normalised 0–100 (Output & Speed relative to the best performer that
+// period; Rock-friendly — no targets to maintain), then blended by weights stored
+// in system_settings (editable in System Settings). Compares to the previous
+// period for the ▲▼ movement. All from existing fields — no money, no customer
+// names. authenticate-only (no role gate): it is names + scores, the same exposure
+// as the floor board, and it feeds the all-roles Floor Display leaderboard.
+const DEFAULT_WEIGHTS = { ontime: 30, output: 30, quality: 25, speed: 15 };
+const ROLE_DEPT = {
+  production_lead: 'Production', production_staff: 'Production',
+  packing_staff: 'Packing', delivery_team: 'Delivery',
+};
+const DEPT_COLOR = { Production: '#f97316', Packing: '#f5b13a', Delivery: '#60a5fa' };
+const clamp100 = (n) => Math.max(0, Math.min(100, n));
+
+async function readWeights() {
+  try {
+    const row = (await query("SELECT value FROM system_settings WHERE key = 'scorecard_weights'")).rows[0];
+    if (!row || !row.value) return { ...DEFAULT_WEIGHTS };
+    const w = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+    const out = {};
+    for (const k of ['ontime', 'output', 'quality', 'speed']) {
+      const v = Number(w[k]);
+      out[k] = Number.isFinite(v) && v >= 0 ? v : DEFAULT_WEIGHTS[k];
+    }
+    return (out.ontime + out.output + out.quality + out.speed) > 0 ? out : { ...DEFAULT_WEIGHTS };
+  } catch { return { ...DEFAULT_WEIGHTS }; }
+}
+
+// Turn raw pillar inputs into 0–100 scores + the weighted composite. On-time and
+// Quality are already percentages; Output and Speed are scaled against the best
+// performer in the set. `higher` = whether a bigger speed_raw is better (people:
+// STKs/day → yes; departments: avg dwell hours → no).
+function scoreUnits(units, weights, higher) {
+  const maxOut = Math.max(1, ...units.map((u) => Number(u.output_raw) || 0));
+  const sp = units.map((u) => Number(u.speed_raw)).filter((v) => Number.isFinite(v) && v > 0);
+  const bestSp = sp.length ? (higher ? Math.max(...sp) : Math.min(...sp)) : 0;
+  const wsum = (weights.ontime + weights.output + weights.quality + weights.speed) || 1;
+  for (const u of units) {
+    const pOn = u.ontime_pct == null ? 0 : clamp100(u.ontime_pct);
+    const pQ = u.quality_pct == null ? 0 : clamp100(u.quality_pct);
+    const pOut = Math.round((Number(u.output_raw) || 0) / maxOut * 100);
+    const v = Number(u.speed_raw);
+    let pSp = 0;
+    if (bestSp > 0 && Number.isFinite(v) && v > 0) pSp = clamp100(higher ? (v / bestSp) * 100 : (bestSp / v) * 100);
+    u.pillars = { ontime: Math.round(pOn), output: pOut, quality: Math.round(pQ), speed: Math.round(pSp) };
+    u.score = Math.round((pOn * weights.ontime + pOut * weights.output + pQ * weights.quality + pSp * weights.speed) / wsum);
+  }
+  return units;
+}
+
+// GET /api/reports/scorecard?period=monthly|weekly&unit=dept|people
+router.get('/scorecard', authenticate, asyncHandler(async (req, res) => {
+  const period = req.query.period === 'weekly' ? 'weekly' : 'monthly';
+  const unit = req.query.unit === 'people' ? 'people' : 'dept';
+  const U = period === 'weekly' ? 'week' : 'month';
+  const weights = await readWeights();
+  // off: 0 = current period, 1 = previous (for the ▲▼ movement). off is an integer
+  // we control (never user input), so inlining it into the SQL is injection-safe.
+  const win = (col, off) => `date_trunc('${U}', ${col}) = (date_trunc('${U}', now()) - INTERVAL '${off} ${U}')`;
+
+  async function deptUnits(off) {
+    const fwd = (await query(`
+      SELECT st.from_stage, st.to_stage, COUNT(*)::int AS n,
+        SUM(CASE WHEN st.created_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
+      FROM stage_transitions st JOIN orders o ON o.id = st.order_id
+      WHERE (st.from_stage, st.to_stage) IN (('production','packing'),('packing','ready_for_delivery'))
+        AND ${win('st.created_at', off)}
+      GROUP BY 1, 2
+    `)).rows;
+    const rw = (await query(`
+      SELECT st.to_stage, COUNT(*)::int AS n FROM stage_transitions st
+      WHERE ((st.to_stage='production' AND st.from_stage IN ('packing','ready_for_delivery','delivered'))
+          OR (st.to_stage='packing'    AND st.from_stage IN ('ready_for_delivery','delivered')))
+        AND ${win('st.created_at', off)}
+      GROUP BY 1
+    `)).rows;
+    const dw = (await query(`
+      WITH seq AS (
+        SELECT order_id, to_stage AS stage, created_at,
+          LEAD(created_at) OVER (PARTITION BY order_id ORDER BY created_at) AS next_at
+        FROM stage_transitions
+      )
+      SELECT stage, AVG(EXTRACT(EPOCH FROM (next_at - created_at)) / 3600.0) AS avg_hours
+      FROM seq WHERE next_at IS NOT NULL AND stage IN ('production','packing') AND ${win('next_at', off)}
+      GROUP BY stage
+    `)).rows;
+    const del = (await query(`
+      SELECT COUNT(*) FILTER (WHERE d.status='delivered')::int AS delivered,
+        SUM(CASE WHEN d.status='delivered' AND d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time,
+        SUM(CASE WHEN d.status='delivered' AND d.delivered_at::date >  o.required_delivery_date THEN 1 ELSE 0 END)::int AS late,
+        AVG(CASE WHEN d.status='delivered' THEN EXTRACT(EPOCH FROM (d.delivered_at - d.created_at)) / 3600.0 END) AS avg_turn
+      FROM deliveries d JOIN orders o ON o.id = d.order_id
+      WHERE ${win('COALESCE(d.delivered_at, d.created_at)', off)}
+    `)).rows[0];
+    const failed = (await query(`SELECT COUNT(*)::int AS n FROM deliveries WHERE status='failed' AND ${win('created_at', off)}`)).rows[0].n;
+
+    const pick = (from, to) => fwd.find((r) => r.from_stage === from && r.to_stage === to) || { n: 0, on_time: 0 };
+    const rwOf = (stage) => (rw.find((r) => r.to_stage === stage) || { n: 0 }).n;
+    const dwOf = (stage) => { const r = dw.find((x) => x.stage === stage); return r && r.avg_hours != null ? Number(r.avg_hours) : null; };
+    const pct = (num, den) => den > 0 ? (num / den) * 100 : null;
+    const prod = pick('production', 'packing'), pack = pick('packing', 'ready_for_delivery');
+    return [
+      { key: 'Production', name: 'Production', color: DEPT_COLOR.Production,
+        output_raw: prod.n, ontime_pct: pct(prod.on_time, prod.n),
+        quality_pct: prod.n > 0 ? 100 - (rwOf('production') / prod.n) * 100 : null, speed_raw: dwOf('production'),
+        raw: { on_time: prod.on_time, total: prod.n, reworks: rwOf('production'), dwell_h: dwOf('production') } },
+      { key: 'Packing', name: 'Packing', color: DEPT_COLOR.Packing,
+        output_raw: pack.n, ontime_pct: pct(pack.on_time, pack.n),
+        quality_pct: pack.n > 0 ? 100 - (rwOf('packing') / pack.n) * 100 : null, speed_raw: dwOf('packing'),
+        raw: { on_time: pack.on_time, total: pack.n, reworks: rwOf('packing'), dwell_h: dwOf('packing') } },
+      { key: 'Delivery', name: 'Delivery', color: DEPT_COLOR.Delivery,
+        output_raw: del.delivered, ontime_pct: pct(del.on_time, del.delivered),
+        quality_pct: del.delivered > 0 ? 100 - ((failed + (del.late || 0)) / del.delivered) * 100 : null,
+        speed_raw: del.avg_turn != null ? Number(del.avg_turn) : null,
+        raw: { on_time: del.on_time, total: del.delivered, failed, late: del.late || 0, turn_h: del.avg_turn != null ? Number(del.avg_turn) : null } },
+    ];
+  }
+
+  async function peopleUnits(off) {
+    const rows = (await query(`
+      WITH trans AS (
+        SELECT st.transitioned_by AS uid,
+          SUM(CASE WHEN ${FORWARD_PAIRS} THEN 1 ELSE 0 END)::int AS completions,
+          SUM(CASE WHEN (${FORWARD_PAIRS}) AND st.created_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time,
+          SUM(CASE WHEN st.from_stage='packing' AND st.to_stage='production' THEN 1 ELSE 0 END)::int AS reworks,
+          COUNT(DISTINCT st.created_at::date)::int AS active_days
+        FROM stage_transitions st JOIN orders o ON o.id = st.order_id
+        WHERE st.transitioned_by IS NOT NULL AND ${win('st.created_at', off)}
+        GROUP BY 1
+      ),
+      items  AS (SELECT made_by      AS uid, COUNT(*)::int AS n FROM order_items WHERE status='done'      AND made_by      IS NOT NULL AND ${win('made_at', off)}      GROUP BY 1),
+      pitems AS (SELECT pack_made_by AS uid, COUNT(*)::int AS n FROM order_items WHERE pack_status='done' AND pack_made_by IS NOT NULL AND ${win('pack_made_at', off)} GROUP BY 1)
+      SELECT u.id, u.name, u.role, u.avatar_color,
+        COALESCE(t.completions,0) AS completions, COALESCE(t.on_time,0) AS on_time,
+        COALESCE(t.reworks,0) AS reworks, COALESCE(t.active_days,0) AS active_days,
+        COALESCE(i.n,0) + COALESCE(p.n,0) AS items
+      FROM users u
+      LEFT JOIN trans t ON t.uid = u.id LEFT JOIN items i ON i.uid = u.id LEFT JOIN pitems p ON p.uid = u.id
+      WHERE u.is_active = true AND u.role IN ('production_lead','production_staff','packing_staff','delivery_team')
+    `)).rows;
+    return rows
+      .map((r) => ({
+        key: r.id, name: r.name, color: r.avatar_color, dept: ROLE_DEPT[r.role] || null,
+        output_raw: (r.completions || 0) + (r.items || 0),
+        ontime_pct: r.completions > 0 ? (r.on_time / r.completions) * 100 : null,
+        quality_pct: r.completions > 0 ? 100 - (r.reworks / r.completions) * 100 : 100,
+        speed_raw: r.active_days > 0 ? r.items / r.active_days : 0,
+        raw: { completions: r.completions, items: r.items, on_time: r.on_time, reworks: r.reworks, active_days: r.active_days },
+      }))
+      .filter((u) => u.output_raw > 0);
+  }
+
+  const build = unit === 'people' ? peopleUnits : deptUnits;
+  const higher = unit === 'people'; // people speed = STKs/day (higher better); dept speed = dwell hours (lower better)
+  const cur = scoreUnits(await build(0), weights, higher);
+  const prev = scoreUnits(await build(1), weights, higher);
+
+  const prevRank = {};
+  prev.slice().sort((a, b) => b.score - a.score).forEach((u, i) => { prevRank[u.key] = i + 1; });
+  cur.sort((a, b) => b.score - a.score);
+  const leaderboard = cur.map((u, i) => {
+    const was = prevRank[u.key];
+    return {
+      key: u.key, name: u.name, dept: u.dept || null, color: u.color || null,
+      score: u.score, pillars: u.pillars, raw: u.raw,
+      rank: i + 1, prev_rank: was || null, delta: was ? was - (i + 1) : null,
+    };
+  });
+
+  res.json({ unit, period, weights, leaderboard });
+}));
+
 module.exports = router;
