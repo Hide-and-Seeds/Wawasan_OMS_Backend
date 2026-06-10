@@ -144,7 +144,13 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
     catch (e) { return res.status(502).json({ error: `Signature upload failed: ${e.message}` }); }
   }
 
-  await withTransaction(async (q) => {
+  const result = await withTransaction(async (q) => {
+    // Lock the row and re-check inside the tx: the pre-check above is racy, so two
+    // concurrent completions (double-tap / lost-response retry) must not both write
+    // a 'delivered' transition. The second waits on the lock, then sees 'delivered'.
+    const locked = (await q("SELECT status FROM deliveries WHERE id = $1 FOR UPDATE", [delivery.id])).rows[0];
+    if (!locked || locked.status === 'delivered') return { already: true };
+
     await q(`
       UPDATE deliveries SET status = 'delivered', delivered_at = now(),
         signature_file = $1, updated_at = now() WHERE id = $2
@@ -161,8 +167,10 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
       [uuidv4(), delivery.order_id, req.user.id, 'Marked delivered']);
     await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'delivered');
+    return { already: false };
   });
 
+  if (result.already) return res.status(409).json({ error: 'This delivery is already completed' });
   res.json({ message: 'Marked as delivered' });
 }));
 
@@ -177,10 +185,19 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
 
   const { order_id } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
-  const order = (await query("SELECT id, delivery_address FROM orders WHERE id = $1 AND stage = 'ready_for_delivery'", [order_id])).rows[0];
-  if (!order) return res.status(400).json({ error: 'Order not found or not ready for delivery' });
+  const order = (await query("SELECT id, stage, delivery_address FROM orders WHERE id = $1", [order_id])).rows[0];
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  // Lost-response retry / double-tap from the field: it's already delivered — report
+  // success, not a confusing "not ready" error.
+  if (order.stage === 'delivered') return res.json({ message: 'Already delivered', already: true });
+  if (order.stage !== 'ready_for_delivery') return res.status(400).json({ error: 'Order is not ready for delivery' });
 
-  await withTransaction(async (q) => {
+  const result = await withTransaction(async (q) => {
+    // Lock the order row and re-check inside the tx so two simultaneous one-taps
+    // can't both write a 'delivered' transition.
+    const o = (await q("SELECT stage FROM orders WHERE id = $1 FOR UPDATE", [order_id])).rows[0];
+    if (!o || o.stage !== 'ready_for_delivery') return { already: true };
+
     const active = (await q("SELECT id FROM deliveries WHERE order_id = $1 AND status IN ('pending','in_transit') ORDER BY created_at DESC LIMIT 1", [order_id])).rows[0];
     if (active) {
       await q("UPDATE deliveries SET status = 'delivered', delivered_at = now(), updated_at = now() WHERE id = $1", [active.id]);
@@ -195,8 +212,10 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
       [uuidv4(), order_id, req.user.id, 'Marked delivered (one-tap)']);
     await notifyDelivered(q, order_id, req.user.id, req.user.name, 'delivered');
+    return { already: false };
   });
 
+  if (result.already) return res.json({ message: 'Already delivered', already: true });
   res.json({ message: 'Marked as delivered' });
 }));
 

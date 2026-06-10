@@ -528,6 +528,13 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
       details: `${fromStage} → ${to_stage}${reason ? ': ' + reason : ''}`,
       oldValue: fromStage, newValue: to_stage, ipAddress: req.ip });
 
+    // Leaving the delivery pipeline without completing (cancelled, or sent back for a
+    // fix) voids any open delivery, so dispatch doesn't keep an orphan booking for an
+    // order that's no longer ready. Only touches pending/in_transit rows.
+    if (to_stage !== 'delivered') {
+      await q("UPDATE deliveries SET status = 'failed', updated_at = now() WHERE order_id = $1 AND status IN ('pending','in_transit')", [order.id]);
+    }
+
     // Notify the PIC of any move.
     if (order.pic_id && order.pic_id !== req.user.id) {
       await notify(q, {
