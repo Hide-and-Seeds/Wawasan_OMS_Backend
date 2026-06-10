@@ -36,17 +36,23 @@ async function ensureDeliverySchema() {
 // Ping the PIC + Boss/Ops/Admin when a delivery completes or is reopened, so a
 // completion/undo isn't silent. (Notification insert is inlined here — delivery.js
 // has no access to the notify helper in orders.js.)
-async function notifyDelivered(q, orderId, actorId, actorName, kind) {
+async function notifyDelivered(q, orderId, actorId, actorName, kind, noProof = false) {
   const ord = (await q('SELECT invoice_number, pic_id FROM orders WHERE id = $1', [orderId])).rows[0];
   if (!ord) return;
   const recips = (await q("SELECT id FROM users WHERE role IN ('super_admin','operations_controller','admin') AND is_active = true")).rows.map((r) => r.id);
   if (ord.pic_id) recips.push(ord.pic_id);
-  const title = kind === 'reopened' ? `Order ${ord.invoice_number} reopened — back to Ready` : `Order ${ord.invoice_number} delivered`;
-  const type = kind === 'reopened' ? 'order_reopened' : 'order_delivered';
+  const reopened = kind === 'reopened';
+  // A delivery with no proof attached is pushed to Boss/Ops/Admin with a ⚠ so it's
+  // caught even if nobody is watching the "no proof" column — no admin chase needed.
+  const title = reopened ? `Order ${ord.invoice_number} reopened — back to Ready`
+    : noProof ? `Order ${ord.invoice_number} delivered — ⚠ NO PROOF`
+    : `Order ${ord.invoice_number} delivered`;
+  const type = reopened ? 'order_reopened' : 'order_delivered';
+  const message = (!reopened && noProof) ? `By ${actorName} · no proof of delivery attached — please verify` : `By ${actorName}`;
   for (const uid of [...new Set(recips)]) {
     if (uid === actorId) continue;
     await q(`INSERT INTO notifications (id, user_id, type, title, message, order_id) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [uuidv4(), uid, type, title, `By ${actorName}`, orderId]);
+      [uuidv4(), uid, type, title, message, orderId]);
   }
 }
 
@@ -138,6 +144,12 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
   const allowed = ['super_admin', 'operations_controller', 'delivery_team', 'admin'];
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
 
+  // Proof gate: a completed delivery needs a POD photo on the order, unless the
+  // caller explicitly delivers without one (no_proof) — then Boss/Ops are notified.
+  await ensureDeliverySchema();
+  const hasPod = !!(await query("SELECT 1 FROM order_attachments WHERE order_id = $1 AND kind = 'pod' LIMIT 1", [delivery.order_id])).rows[0];
+  if (!hasPod && !req.body.no_proof) return res.status(428).json({ error: 'no_proof' });
+
   let signatureFile = null;
   if (req.file) {
     try { const { path: storedPath } = await uploadBuffer(req.file, 'signatures/'); signatureFile = storedPath; }
@@ -165,8 +177,8 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
     // Audit log (was previously missing on delivery completion).
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
-      [uuidv4(), delivery.order_id, req.user.id, 'Marked delivered']);
-    await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'delivered');
+      [uuidv4(), delivery.order_id, req.user.id, hasPod ? 'Marked delivered' : 'Marked delivered — no proof']);
+    await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'delivered', !hasPod);
     return { already: false };
   });
 
@@ -183,7 +195,7 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
-  const { order_id } = req.body;
+  const { order_id, no_proof } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
   const order = (await query("SELECT id, stage, delivery_address FROM orders WHERE id = $1", [order_id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -191,6 +203,11 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
   // success, not a confusing "not ready" error.
   if (order.stage === 'delivered') return res.json({ message: 'Already delivered', already: true });
   if (order.stage !== 'ready_for_delivery') return res.status(400).json({ error: 'Order is not ready for delivery' });
+
+  // Proof gate: need a POD photo on the order unless the caller delivers without one
+  // (then Boss/Ops get a ⚠ no-proof ping). ensureDeliverySchema() above made kind exist.
+  const hasPod = !!(await query("SELECT 1 FROM order_attachments WHERE order_id = $1 AND kind = 'pod' LIMIT 1", [order_id])).rows[0];
+  if (!hasPod && !no_proof) return res.status(428).json({ error: 'no_proof' });
 
   const result = await withTransaction(async (q) => {
     // Lock the order row and re-check inside the tx so two simultaneous one-taps
@@ -210,8 +227,8 @@ router.post('/quick-deliver', authenticate, asyncHandler(async (req, res) => {
       [uuidv4(), order_id, req.user.id]);
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
-      [uuidv4(), order_id, req.user.id, 'Marked delivered (one-tap)']);
-    await notifyDelivered(q, order_id, req.user.id, req.user.name, 'delivered');
+      [uuidv4(), order_id, req.user.id, hasPod ? 'Marked delivered (one-tap)' : 'Marked delivered (one-tap) — no proof']);
+    await notifyDelivered(q, order_id, req.user.id, req.user.name, 'delivered', !hasPod);
     return { already: false };
   });
 
