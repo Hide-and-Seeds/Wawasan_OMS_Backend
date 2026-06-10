@@ -572,6 +572,128 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
   res.json({ pics });
 }));
 
+// GET /api/reports/efficiency — flow health: end-to-end cycle time, on-time rate,
+// the bottleneck stage (longest avg dwell) and aging WIP (oldest open orders).
+// Boss/Ops only (spans delivery). Invoice numbers only — no customer names.
+router.get('/efficiency', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  const { period = 'weekly', from, to } = req.query;
+  const win = (col) => {
+    if (from && to) return `AND ${col} BETWEEN $1 AND $2`;
+    if (period === 'daily') return `AND ${col}::date = CURRENT_DATE`;
+    if (period === 'monthly') return `AND date_trunc('month', ${col}) = date_trunc('month', now())`;
+    return `AND date_trunc('week', ${col}) = date_trunc('week', now())`;
+  };
+  const params = (from && to) ? [from, to] : [];
+
+  // Cycle time: first stage entry → delivered, for orders delivered in the period.
+  const cycle = (await query(`
+    WITH starts AS (SELECT order_id, MIN(created_at) AS start_at FROM stage_transitions GROUP BY order_id)
+    SELECT ROUND(AVG(EXTRACT(EPOCH FROM (dl.created_at - s.start_at)) / 3600.0)::numeric, 1) AS avg_hours, COUNT(*)::int AS n
+    FROM stage_transitions dl JOIN starts s ON s.order_id = dl.order_id
+    WHERE dl.to_stage = 'delivered' ${win('dl.created_at')}
+  `, params)).rows[0];
+
+  // Avg dwell per stage = time from entering a stage to leaving it.
+  const dwell = (await query(`
+    WITH seq AS (
+      SELECT order_id, to_stage AS stage, created_at,
+        LEAD(created_at) OVER (PARTITION BY order_id ORDER BY created_at) AS next_at
+      FROM stage_transitions
+    )
+    SELECT stage, ROUND(AVG(EXTRACT(EPOCH FROM (next_at - created_at)) / 3600.0)::numeric, 1) AS avg_hours, COUNT(*)::int AS n
+    FROM seq
+    WHERE next_at IS NOT NULL AND stage IN ('order','production','packing','ready_for_delivery') ${win('created_at')}
+    GROUP BY stage
+  `, params)).rows;
+
+  const ot = (await query(`
+    SELECT COUNT(*)::int AS total,
+      SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
+    FROM deliveries d JOIN orders o ON o.id = d.order_id
+    WHERE d.status = 'delivered' ${win('d.delivered_at')}
+  `, params)).rows[0];
+
+  // Aging WIP (live): open orders, oldest first, with days open + days late.
+  const aging = (await query(`
+    SELECT o.invoice_number, o.stage, o.required_delivery_date,
+      (CURRENT_DATE - MIN(st.created_at)::date)::int AS days_open,
+      (CURRENT_DATE - o.required_delivery_date)::int AS days_late
+    FROM orders o JOIN stage_transitions st ON st.order_id = o.id
+    WHERE o.stage NOT IN ('delivered','cancelled')
+    GROUP BY o.id, o.invoice_number, o.stage, o.required_delivery_date
+    ORDER BY MIN(st.created_at) ASC LIMIT 12
+  `)).rows;
+
+  const bottleneck = dwell.reduce((m, s) => (Number(s.avg_hours) > Number((m && m.avg_hours) || 0) ? s : m), null);
+
+  res.json({
+    avg_cycle_hours: cycle.avg_hours != null ? Number(cycle.avg_hours) : null,
+    cycle_n: cycle.n,
+    on_time_total: ot.total, on_time_count: ot.on_time || 0,
+    on_time_rate: ot.total > 0 ? +(((ot.on_time || 0) / ot.total) * 100).toFixed(1) : null,
+    stage_dwell: dwell.map((s) => ({ stage: s.stage, avg_hours: Number(s.avg_hours), n: s.n })),
+    bottleneck: bottleneck ? { stage: bottleneck.stage, avg_hours: Number(bottleneck.avg_hours) } : null,
+    aging
+  });
+}));
+
+// GET /api/reports/mistakes — error & rework lens: amendments, late / failed
+// deliveries, cancellations, holds and waiting-stock — all from existing tables.
+// Boss/Ops only. The thing nothing aggregated before. No money, no customer names.
+router.get('/mistakes', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+  const { period = 'weekly', from, to } = req.query;
+  const win = (col) => {
+    if (from && to) return `AND ${col} BETWEEN $1 AND $2`;
+    if (period === 'daily') return `AND ${col}::date = CURRENT_DATE`;
+    if (period === 'monthly') return `AND date_trunc('month', ${col}) = date_trunc('month', now())`;
+    return `AND date_trunc('week', ${col}) = date_trunc('week', now())`;
+  };
+  const params = (from && to) ? [from, to] : [];
+
+  const amendCount = (await query(
+    `SELECT COUNT(*)::int AS n FROM activity_log WHERE action = 'order_edited' ${win('created_at')}`, params
+  )).rows[0].n;
+  const amendList = (await query(`
+    SELECT al.created_at, al.details, u.name AS user_name, o.invoice_number
+    FROM activity_log al LEFT JOIN users u ON u.id = al.user_id LEFT JOIN orders o ON o.id = al.order_id
+    WHERE al.action = 'order_edited' ${win('al.created_at')}
+    ORDER BY al.created_at DESC LIMIT 12
+  `, params)).rows;
+
+  const lateCount = (await query(`
+    SELECT COUNT(*)::int AS n FROM deliveries d JOIN orders o ON o.id = d.order_id
+    WHERE d.status = 'delivered' AND d.delivered_at::date > o.required_delivery_date ${win('d.delivered_at')}
+  `, params)).rows[0].n;
+  const lateList = (await query(`
+    SELECT o.invoice_number, (d.delivered_at::date - o.required_delivery_date)::int AS days_late,
+      COALESCE(dl.name, u.name) AS driver
+    FROM deliveries d JOIN orders o ON o.id = d.order_id
+    LEFT JOIN deliverers dl ON dl.id = d.deliverer_id LEFT JOIN users u ON u.id = d.delivery_man_id
+    WHERE d.status = 'delivered' AND d.delivered_at::date > o.required_delivery_date ${win('d.delivered_at')}
+    ORDER BY days_late DESC LIMIT 12
+  `, params)).rows;
+
+  const failed = (await query("SELECT COUNT(*)::int AS n FROM deliveries WHERE status = 'failed'")).rows[0].n;
+  const cancelled = (await query("SELECT COUNT(*)::int AS n FROM orders WHERE stage = 'cancelled'")).rows[0].n;
+  const onHold = (await query("SELECT COUNT(*)::int AS n FROM orders WHERE on_hold = true")).rows[0].n;
+  const waiting = (await query("SELECT COUNT(*)::int AS n FROM orders WHERE waiting_stock = true")).rows[0].n;
+
+  // 8-week amendment trend (the "is it getting better" line).
+  const trend = (await query(`
+    SELECT date_trunc('week', created_at)::date AS date, COUNT(*)::int AS count
+    FROM activity_log
+    WHERE action = 'order_edited' AND created_at >= date_trunc('week', now()) - INTERVAL '7 weeks'
+    GROUP BY 1 ORDER BY 1
+  `)).rows;
+
+  res.json({
+    amendments: { count: amendCount, list: amendList },
+    late: { count: lateCount, list: lateList },
+    failed_count: failed, cancelled_count: cancelled, on_hold_count: onHold, waiting_stock_count: waiting,
+    trend
+  });
+}));
+
 // GET /api/reports/audit — audit trail (admin only)
 router.get('/audit', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
   const { user_id, action, from, to, page = 1, limit = 50 } = req.query;
