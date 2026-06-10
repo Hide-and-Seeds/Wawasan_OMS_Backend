@@ -6,7 +6,7 @@ const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
 const { authenticate } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
-const { uploadBuffer } = require('../lib/supabaseClient');
+const { uploadBuffer, publicUrl } = require('../lib/supabaseClient');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -74,7 +74,8 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
   const deliveries = (await query(`
     SELECT d.*, o.invoice_number, o.customer_name, o.required_delivery_date,
       COALESCE(dl.name, u.name) AS delivery_man_name, dl.name AS deliverer_name,
-      EXISTS(SELECT 1 FROM order_attachments a WHERE a.order_id = d.order_id AND a.kind = 'pod') AS has_pod
+      EXISTS(SELECT 1 FROM order_attachments a WHERE a.order_id = d.order_id AND a.kind = 'pod') AS has_pod,
+      (SELECT a.filename FROM order_attachments a WHERE a.order_id = d.order_id AND a.kind = 'pod' ORDER BY a.uploaded_at DESC LIMIT 1) AS pod_file
     FROM deliveries d
     JOIN orders o ON d.order_id = o.id
     LEFT JOIN deliverers dl ON d.deliverer_id = dl.id
@@ -83,8 +84,14 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     ORDER BY d.scheduled_date ASC, o.required_delivery_date ASC
   `, params)).rows;
 
+  // Attach a viewable URL for the proof photo so it can be previewed straight from
+  // the delivery list — no need to open the order detail. pod_file stays internal.
+  const out = deliveries.map((d) => {
+    const { pod_file, ...rest } = d;
+    return { ...rest, pod_url: pod_file ? publicUrl(pod_file) : null };
+  });
   const hideCustomer = CUSTOMER_HIDDEN_ROLES.includes(req.user.role);
-  res.json(hideCustomer ? deliveries.map((d) => ({ ...d, customer_name: null, address: null })) : deliveries);
+  res.json(hideCustomer ? out.map((d) => ({ ...d, customer_name: null, address: null })) : out);
 }));
 
 // POST /api/delivery — assign delivery
