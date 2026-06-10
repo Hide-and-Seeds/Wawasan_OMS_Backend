@@ -67,6 +67,20 @@ function notify(q, { userId, type, title, message, orderId }) {
   );
 }
 
+// Helper: ping everyone who routes a new order (assigns PIC / sets priority).
+// One role list, shared by the manual-create and SQL-Account-webhook paths so the
+// two can't drift. production_lead is included — the floor lead (Renee) needs to
+// know a new order landed; operations_controller is currently empty but harmless.
+async function notifyOrderRouters(q, { orderId, title, message, excludeUserId }) {
+  const routers = (await q(
+    "SELECT id FROM users WHERE role IN ('operations_controller','super_admin','admin','production_lead') AND is_active = true"
+  )).rows;
+  for (const u of routers) {
+    if (u.id === excludeUserId) continue;
+    await notify(q, { userId: u.id, type: 'order_stage_entered', title, message, orderId });
+  }
+}
+
 // Self-migration: ensure the per-SKU "made" tracking columns exist (runs once
 // per process; ADD COLUMN IF NOT EXISTS is idempotent and cheap on a no-op).
 let _itemColsReady = false;
@@ -339,6 +353,12 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
     await logActivity(q, { orderId, userId: req.user.id, action: 'order_created',
       details: `Order ${code} created`, newValue: initialStage, ipAddress: req.ip });
+
+    // Tell the routers a new order landed (manual create used to notify no one).
+    await notifyOrderRouters(q, { orderId,
+      title: `New order ${code}`,
+      message: `${customer_name} — added by ${req.user.name}. Assign a PIC to start production.`,
+      excludeUserId: req.user.id });
   });
 
   const created = (await query('SELECT * FROM orders WHERE id = $1', [orderId])).rows[0];
@@ -764,14 +784,10 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
     await logActivity(q, { orderId, userId: systemUser.id, action: 'order_created',
       details: `Order ${invoice_number} imported from SQL Account`, newValue: initialStage, ipAddress: req.ip });
 
-    // Tell Operations, Boss and back-office Admin a new invoice arrived so they route it (assign PIC, set priority).
-    const routers = (await q("SELECT id FROM users WHERE role IN ('operations_controller','super_admin','admin') AND is_active = true")).rows;
-    for (const u of routers) {
-      await notify(q, { userId: u.id, type: 'order_stage_entered',
-        title: 'New invoice from SQL Account',
-        message: `${invoice_number} — ${customer_name} landed in Order. Assign a PIC to start production.`,
-        orderId });
-    }
+    // Tell the routers a new invoice arrived so they route it (assign PIC, set priority).
+    await notifyOrderRouters(q, { orderId,
+      title: 'New invoice from SQL Account',
+      message: `${invoice_number} — ${customer_name} landed in Order. Assign a PIC to start production.` });
   });
 
   res.status(201).json({ id: orderId, invoice_number, stage: initialStage });
