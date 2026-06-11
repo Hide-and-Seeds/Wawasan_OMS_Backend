@@ -7,6 +7,7 @@ const { query, withTransaction } = require('../utils/db');
 const { authenticate, authorize, canMoveOrders } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const { uploadBuffer, publicUrl, removeObject } = require('../lib/supabaseClient');
+const { parseInvoicesFromCsv } = require('../lib/sqlAccountCsv');
 
 // Files are buffered in memory then streamed to Supabase Storage
 // (the local filesystem is ephemeral on serverless hosts like Vercel).
@@ -23,6 +24,19 @@ const upload = multer({
 // Wrap multer so size/type errors return a clean message instead of a generic 500.
 function uploadSingle(field) {
   return (req, res, next) => upload.single(field)(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `File too large — max ${Math.round(MAX_UPLOAD / 1048576)} MB` });
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}
+
+// Separate uploader for the SQL Account CSV import — text/CSV, not the PDF/image
+// filter above. Buffered in memory; the route reads req.file.buffer as UTF-8.
+const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD } });
+function uploadCsvSingle(field) {
+  return (req, res, next) => csvUpload.single(field)(req, res, (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `File too large — max ${Math.round(MAX_UPLOAD / 1048576)} MB` });
       return res.status(400).json({ error: err.message });
@@ -448,6 +462,89 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
   const created = (await query('SELECT * FROM orders WHERE id = $1', [orderId])).rows[0];
   res.status(201).json(created);
+}));
+
+// POST /api/orders/import — bulk-import invoices from a SQL Account CSV export.
+// Two phases on one endpoint: commit=false (default) parses + dedups and returns a
+// PREVIEW (creates nothing); commit=true creates the new ones. Parsing and the
+// duplicate check both run here in the cloud — the client only uploads the file.
+// super_admin only, mirrors manual create / the SQL Account webhook.
+router.post('/import', authenticate, authorize('super_admin'), uploadCsvSingle('file'), asyncHandler(async (req, res) => {
+  await ensureImportance();
+  await ensureOrderFlags();
+
+  let text = '';
+  if (req.file && req.file.buffer) text = req.file.buffer.toString('utf8');
+  else if (req.body && typeof req.body.csv === 'string') text = req.body.csv;
+  if (!text.trim()) return res.status(400).json({ error: 'No CSV file uploaded.' });
+
+  let invoices;
+  try { invoices = parseInvoicesFromCsv(text); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!invoices.length) return res.status(400).json({ error: 'No invoice rows found in that file.' });
+
+  // Which Doc Nos already exist? One query, then a Set for O(1) lookups.
+  const numbers = invoices.map((i) => i.invoice_number);
+  const taken = new Set(
+    (await query('SELECT invoice_number FROM orders WHERE invoice_number = ANY($1::text[])', [numbers])).rows.map((r) => r.invoice_number)
+  );
+
+  const preview = invoices.map((i) => ({
+    invoice_number: i.invoice_number,
+    customer_name: i.customer_name,
+    item_count: i.items.length,
+    exists: taken.has(i.invoice_number),
+  }));
+  const newCount = preview.filter((p) => !p.exists).length;
+  const commit = req.body && (req.body.commit === 'true' || req.body.commit === true);
+
+  if (!commit) {
+    return res.json({ mode: 'preview', total: invoices.length, new_count: newCount, duplicate_count: invoices.length - newCount, invoices: preview });
+  }
+
+  // Create each new invoice as one order — same shape as the SQL Account webhook.
+  const leadDays = parseInt(process.env.SQL_ACCOUNT_DEFAULT_LEAD_DAYS) || 7;
+  const results = [];
+  let created = 0, duplicate = 0, failed = 0;
+  for (const inv of invoices) {
+    if (taken.has(inv.invoice_number)) { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); continue; }
+    const orderId = uuidv4();
+    const composedNotes = [inv.po_ref ? `PO ${inv.po_ref}` : null, inv.payment_terms || null, 'Imported from SQL Account CSV'].filter(Boolean).join(' · ');
+    try {
+      await withTransaction(async (q) => {
+        await q(`
+          INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
+            order_date, required_delivery_date, expiry_date, stage, priority, importance,
+            skip_production, notes, delivery_address, source, created_by)
+          VALUES ($1, $2, $3, $4,
+            COALESCE($5::date, CURRENT_DATE),
+            CURRENT_DATE + $6::int,
+            NULL::date, 'order', 'normal', 'standard',
+            false, $7, NULL, 'sql_account', $8)
+        `, [orderId, inv.invoice_number, inv.customer_name, inv.customer_contact || null,
+          inv.order_date || null, leadDays, composedNotes, req.user.id]);
+
+        for (const item of inv.items) {
+          await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
+            [uuidv4(), orderId, item.sku || 'N/A', item.name || item.sku || 'Item', item.quantity ?? 1, item.unit || 'pcs']);
+        }
+        await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES ($1, $2, NULL, $3, $4)',
+          [uuidv4(), orderId, 'order', req.user.id]);
+        await logActivity(q, { orderId, userId: req.user.id, action: 'order_created',
+          details: `Order ${inv.invoice_number} imported from SQL Account CSV`, newValue: 'order', ipAddress: req.ip });
+        await notifyOrderRouters(q, { orderId,
+          title: 'New invoice from SQL Account',
+          message: `${inv.invoice_number} — ${inv.customer_name} imported. Assign a PIC to start production.`,
+          excludeUserId: req.user.id });
+      });
+      taken.add(inv.invoice_number);
+      created++; results.push({ invoice_number: inv.invoice_number, status: 'created', id: orderId });
+    } catch (e) {
+      if (e && e.code === '23505') { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); }
+      else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
+    }
+  }
+  res.status(201).json({ mode: 'commit', total: invoices.length, created, duplicate, failed, results });
 }));
 
 // PATCH /api/orders/:id — edit order details
