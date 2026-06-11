@@ -167,8 +167,8 @@ async function ensureOrderFlags() {
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS waiting_stock boolean NOT NULL DEFAULT false');
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS hold_reason text');
   // Delivery destination on the order itself, so dispatch sees where it goes on the
-  // Ready list (the SQL Account feed sends name + phone, not an address). Optional —
-  // typed by staff, or sent by the webhook when the invoice carries a ship-to.
+  // Ready list. Filled from the invoice's Delivery Address column(s) by the bridge /
+  // CSV import when present; otherwise typed by staff in Dispatch.
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text');
   _orderFlagsReady = true;
 }
@@ -502,9 +502,9 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
             COALESCE($5::date, CURRENT_DATE),
             CURRENT_DATE + $6::int,
             NULL::date, 'order', 'normal', 'standard',
-            false, $7, NULL, 'sql_account', $8)
+            false, $7, $8, 'sql_account', $9)
         `, [orderId, inv.invoice_number, inv.customer_name, inv.customer_contact || null,
-          inv.order_date || null, leadDays, composedNotes, createdBy]);
+          inv.order_date || null, leadDays, composedNotes, inv.delivery_address || null, createdBy]);
 
         for (const item of inv.items) {
           await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',

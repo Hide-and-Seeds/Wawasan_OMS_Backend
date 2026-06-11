@@ -67,13 +67,24 @@ function toIsoDate(s) {
 
 const num = (s) => { const n = parseFloat(String(s ?? '').replace(/,/g, '')); return Number.isFinite(n) ? n : 1; };
 
+// SQL Account splits the delivery address across DeliveryAddress1..4 (or a single
+// "Delivery Address" / "Ship To" column). Collect every delivery-address column and
+// join them; billing-address columns are deliberately NOT matched.
+const ADDR_RE = /^(deliveryaddress|deladdress|shippingaddress|shipto|deliveraddress)\d*$/;
+function joinDeliveryAddress(normed, r) {
+  const parts = [];
+  normed.forEach((h, j) => { if (ADDR_RE.test(h)) { const v = String(r[j] ?? '').trim(); if (v) parts.push(v); } });
+  return parts.join(', ') || null;
+}
+
 // Parse CSV text → [{ invoice_number, customer_name, customer_contact, order_date,
-// po_ref, payment_terms, items: [{ sku, name, quantity, unit }] }]. Throws a
-// human-readable Error if the Doc-No or Customer column can't be found.
+// po_ref, payment_terms, delivery_address, items: [{ sku, name, quantity, unit }] }].
+// Throws a human-readable Error if the Doc-No or Customer column can't be found.
 function parseInvoicesFromCsv(text) {
   const rows = parseCsv(String(text || ''));
   if (rows.length < 2) return [];
   const headers = rows[0];
+  const normed = headers.map(norm);
   const ix = buildResolver(headers);
   if (ix.docNo < 0 || ix.customer < 0) {
     throw new Error(`Could not find a Doc-No or Customer column. Columns seen: ${headers.join(', ')}`);
@@ -91,6 +102,7 @@ function parseInvoicesFromCsv(text) {
         order_date: toIsoDate(get(r, 'date')),
         po_ref: get(r, 'po') || null,
         payment_terms: get(r, 'terms') || null,
+        delivery_address: joinDeliveryAddress(normed, r),
         items: [],
       });
     }

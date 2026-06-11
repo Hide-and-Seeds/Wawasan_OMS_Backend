@@ -26,6 +26,8 @@ async function ensureDeliverySchema() {
     created_at timestamptz not null default now()
   )`);
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliverer_id uuid REFERENCES deliverers(id)');
+  // When a Delivery Order was last printed — lets a mass print skip already-printed notes.
+  await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS do_printed_at timestamptz');
   // Proof-of-delivery photos live on the order as attachments tagged kind='pod';
   // ensure the tag column exists so the has_pod flag below can read it.
   await query("ALTER TABLE order_attachments ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'file'");
@@ -344,6 +346,29 @@ router.patch('/deliverers/:id', authenticate, asyncHandler(async (req, res) => {
   const idIdx = vals.push(req.params.id);
   await query(`UPDATE deliverers SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
   res.json({ message: 'Deliverer updated' });
+}));
+
+// DELETE /api/delivery/deliverers/:id — remove a DISABLED driver. Past deliveries keep
+// their record but lose the driver name (set NULL), so only a disabled driver can go.
+router.delete('/deliverers/:id', authenticate, asyncHandler(async (req, res) => {
+  if (!DELIVERER_MANAGERS.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  await ensureDeliverySchema();
+  const dl = (await query('SELECT id, is_active FROM deliverers WHERE id = $1', [req.params.id])).rows[0];
+  if (!dl) return res.status(404).json({ error: 'Driver not found' });
+  if (dl.is_active) return res.status(409).json({ error: 'Disable the driver before deleting it' });
+  await query('UPDATE deliveries SET deliverer_id = NULL WHERE deliverer_id = $1', [req.params.id]);
+  await query('DELETE FROM deliverers WHERE id = $1', [req.params.id]);
+  res.json({ message: 'Driver deleted' });
+}));
+
+// POST /api/delivery/mark-do-printed — flag deliveries whose Delivery Order was printed,
+// so a mass print can skip duplicates. Body: { ids: [deliveryId, …] }.
+router.post('/mark-do-printed', authenticate, asyncHandler(async (req, res) => {
+  await ensureDeliverySchema();
+  const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+  if (!ids.length) return res.json({ updated: 0 });
+  const r = await query('UPDATE deliveries SET do_printed_at = now() WHERE id = ANY($1::uuid[])', [ids]);
+  res.json({ updated: r.rowCount });
 }));
 
 module.exports = router;

@@ -98,10 +98,21 @@ function toIsoDate(s) {
 
 const num = (s) => { const n = parseFloat(String(s ?? "").replace(/,/g, "")); return Number.isFinite(n) ? n : 1; };
 
+// Delivery address: SQL Account splits it across DeliveryAddress1..4 (or one
+// "Delivery Address" / "Ship To" column). Collect every delivery-address column and
+// join; billing-address columns are NOT matched.
+const ADDR_RE = /^(deliveryaddress|deladdress|shippingaddress|shipto|deliveraddress)\d*$/;
+function joinDeliveryAddress(normedHeaders, r) {
+  const parts = [];
+  normedHeaders.forEach((h, j) => { if (ADDR_RE.test(h)) { const v = String(r[j] ?? "").trim(); if (v) parts.push(v); } });
+  return parts.join(", ") || undefined;
+}
+
 // ── group flat invoice-line rows into invoices ───────────────────────────────
 function rowsToInvoices(rows) {
   if (rows.length < 2) return [];
   const headers = rows[0];
+  const normedHeaders = headers.map(norm);
   const ix = buildResolver(headers);
   if (ix.docNo < 0 || ix.customer < 0) {
     throw new Error(`CSV missing a Doc-No or Customer column. Headers seen: [${headers.join(", ")}]. Set CSV_MAP in .env to map them.`);
@@ -119,6 +130,7 @@ function rowsToInvoices(rows) {
         order_date: toIsoDate(get(r, "date")),
         po_ref: get(r, "po") || undefined,
         payment_terms: get(r, "terms") || undefined,
+        delivery_address: joinDeliveryAddress(normedHeaders, r),
         items: [],
       });
     }
