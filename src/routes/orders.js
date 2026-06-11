@@ -464,6 +464,58 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   res.status(201).json(created);
 }));
 
+// Create one order per parsed invoice (dedup + stage transition + activity + notify),
+// shared by the upload import (POST /import) and the email-to-board CSV webhook so the
+// two paths never drift. createdBy = the uploader (upload) or the system user (email).
+async function importParsedInvoices(invoices, createdBy, ipAddress) {
+  const leadDays = parseInt(process.env.SQL_ACCOUNT_DEFAULT_LEAD_DAYS) || 7;
+  const numbers = invoices.map((i) => i.invoice_number);
+  const taken = new Set(
+    (await query('SELECT invoice_number FROM orders WHERE invoice_number = ANY($1::text[])', [numbers])).rows.map((r) => r.invoice_number)
+  );
+  const results = [];
+  let created = 0, duplicate = 0, failed = 0;
+  for (const inv of invoices) {
+    if (taken.has(inv.invoice_number)) { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); continue; }
+    const orderId = uuidv4();
+    const composedNotes = [inv.po_ref ? `PO ${inv.po_ref}` : null, inv.payment_terms || null, 'Imported from SQL Account CSV'].filter(Boolean).join(' · ');
+    try {
+      await withTransaction(async (q) => {
+        await q(`
+          INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
+            order_date, required_delivery_date, expiry_date, stage, priority, importance,
+            skip_production, notes, delivery_address, source, created_by)
+          VALUES ($1, $2, $3, $4,
+            COALESCE($5::date, CURRENT_DATE),
+            CURRENT_DATE + $6::int,
+            NULL::date, 'order', 'normal', 'standard',
+            false, $7, NULL, 'sql_account', $8)
+        `, [orderId, inv.invoice_number, inv.customer_name, inv.customer_contact || null,
+          inv.order_date || null, leadDays, composedNotes, createdBy]);
+
+        for (const item of inv.items) {
+          await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
+            [uuidv4(), orderId, item.sku || 'N/A', item.name || item.sku || 'Item', item.quantity ?? 1, item.unit || 'pcs']);
+        }
+        await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES ($1, $2, NULL, $3, $4)',
+          [uuidv4(), orderId, 'order', createdBy]);
+        await logActivity(q, { orderId, userId: createdBy, action: 'order_created',
+          details: `Order ${inv.invoice_number} imported from SQL Account CSV`, newValue: 'order', ipAddress });
+        await notifyOrderRouters(q, { orderId,
+          title: 'New invoice from SQL Account',
+          message: `${inv.invoice_number} — ${inv.customer_name} imported. Assign a PIC to start production.`,
+          excludeUserId: createdBy });
+      });
+      taken.add(inv.invoice_number);
+      created++; results.push({ invoice_number: inv.invoice_number, status: 'created', id: orderId });
+    } catch (e) {
+      if (e && e.code === '23505') { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); }
+      else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
+    }
+  }
+  return { created, duplicate, failed, results };
+}
+
 // POST /api/orders/import — bulk-import invoices from a SQL Account CSV export.
 // Two phases on one endpoint: commit=false (default) parses + dedups and returns a
 // PREVIEW (creates nothing); commit=true creates the new ones. Parsing and the
@@ -502,49 +554,8 @@ router.post('/import', authenticate, authorize('super_admin'), uploadCsvSingle('
     return res.json({ mode: 'preview', total: invoices.length, new_count: newCount, duplicate_count: invoices.length - newCount, invoices: preview });
   }
 
-  // Create each new invoice as one order — same shape as the SQL Account webhook.
-  const leadDays = parseInt(process.env.SQL_ACCOUNT_DEFAULT_LEAD_DAYS) || 7;
-  const results = [];
-  let created = 0, duplicate = 0, failed = 0;
-  for (const inv of invoices) {
-    if (taken.has(inv.invoice_number)) { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); continue; }
-    const orderId = uuidv4();
-    const composedNotes = [inv.po_ref ? `PO ${inv.po_ref}` : null, inv.payment_terms || null, 'Imported from SQL Account CSV'].filter(Boolean).join(' · ');
-    try {
-      await withTransaction(async (q) => {
-        await q(`
-          INSERT INTO orders (id, invoice_number, customer_name, customer_contact,
-            order_date, required_delivery_date, expiry_date, stage, priority, importance,
-            skip_production, notes, delivery_address, source, created_by)
-          VALUES ($1, $2, $3, $4,
-            COALESCE($5::date, CURRENT_DATE),
-            CURRENT_DATE + $6::int,
-            NULL::date, 'order', 'normal', 'standard',
-            false, $7, NULL, 'sql_account', $8)
-        `, [orderId, inv.invoice_number, inv.customer_name, inv.customer_contact || null,
-          inv.order_date || null, leadDays, composedNotes, req.user.id]);
-
-        for (const item of inv.items) {
-          await q('INSERT INTO order_items (id, order_id, sku, name, quantity, unit) VALUES ($1, $2, $3, $4, $5, $6)',
-            [uuidv4(), orderId, item.sku || 'N/A', item.name || item.sku || 'Item', item.quantity ?? 1, item.unit || 'pcs']);
-        }
-        await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by) VALUES ($1, $2, NULL, $3, $4)',
-          [uuidv4(), orderId, 'order', req.user.id]);
-        await logActivity(q, { orderId, userId: req.user.id, action: 'order_created',
-          details: `Order ${inv.invoice_number} imported from SQL Account CSV`, newValue: 'order', ipAddress: req.ip });
-        await notifyOrderRouters(q, { orderId,
-          title: 'New invoice from SQL Account',
-          message: `${inv.invoice_number} — ${inv.customer_name} imported. Assign a PIC to start production.`,
-          excludeUserId: req.user.id });
-      });
-      taken.add(inv.invoice_number);
-      created++; results.push({ invoice_number: inv.invoice_number, status: 'created', id: orderId });
-    } catch (e) {
-      if (e && e.code === '23505') { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); }
-      else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
-    }
-  }
-  res.status(201).json({ mode: 'commit', total: invoices.length, created, duplicate, failed, results });
+  const summary = await importParsedInvoices(invoices, req.user.id, req.ip);
+  res.status(201).json({ mode: 'commit', total: invoices.length, ...summary });
 }));
 
 // PATCH /api/orders/:id — edit order details
@@ -1091,6 +1102,45 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   });
 
   res.status(201).json({ id: orderId, invoice_number, stage: initialStage });
+}));
+
+// POST /api/orders/webhook/sql-account-csv — email-to-board ingest. A free Google
+// Apps Script watches a Gmail inbox and POSTs each invoice CSV attachment here, so the
+// board fills by itself with nothing installed on the client PC. Secret-gated like the
+// per-invoice webhook above; parses + dedups + creates server-side via the shared
+// importParsedInvoices(). Body: { "csv": "<file text>" }; add "dry_run": true to
+// preview without creating. Setup: email-to-board/EMAIL-TO-BOARD-SETUP.md.
+router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
+  const secret = req.headers['x-webhook-secret'];
+  if (!process.env.SQL_ACCOUNT_WEBHOOK_SECRET || secret !== process.env.SQL_ACCOUNT_WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+  await ensureImportance();
+  await ensureOrderFlags();
+
+  const text = (req.body && typeof req.body.csv === 'string') ? req.body.csv
+    : (typeof req.body === 'string' ? req.body : '');
+  if (!text.trim()) return res.status(400).json({ error: 'No CSV provided — send { "csv": "<file text>" }.' });
+
+  let invoices;
+  try { invoices = parseInvoicesFromCsv(text); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!invoices.length) return res.status(400).json({ error: 'No invoice rows found in that CSV.' });
+
+  // dry_run: parse + dedup only, create nothing — for testing the wiring safely.
+  if (req.body && (req.body.dry_run === true || req.body.dry_run === 'true')) {
+    const numbers = invoices.map((i) => i.invoice_number);
+    const taken = new Set((await query('SELECT invoice_number FROM orders WHERE invoice_number = ANY($1::text[])', [numbers])).rows.map((r) => r.invoice_number));
+    return res.json({ mode: 'dry_run', total: invoices.length,
+      new_count: invoices.filter((i) => !taken.has(i.invoice_number)).length,
+      invoices: invoices.map((i) => ({ invoice_number: i.invoice_number, customer_name: i.customer_name, item_count: i.items.length, exists: taken.has(i.invoice_number) })) });
+  }
+
+  const systemUser = (await query("SELECT id FROM users WHERE role = 'super_admin' LIMIT 1")).rows[0];
+  if (!systemUser) return res.status(500).json({ error: 'No system user configured' });
+
+  const summary = await importParsedInvoices(invoices, systemUser.id, req.ip);
+  res.status(201).json({ mode: 'commit', total: invoices.length, ...summary });
 }));
 
 // Orders are never hard-deleted — cancelling (POST /:id/move → 'cancelled') is the
