@@ -834,10 +834,11 @@ router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'product
       await q('UPDATE orders SET importance = $1, updated_at = now() WHERE id = $2 AND stage = $3',
         [set_importance.importance, set_importance.id, stage]);
     }
-    // Position is the array index; only rows actually in that stage are touched.
+    // Position is the array index. Not stage-scoped, so a split-board order can be
+    // reordered from whichever column it shows in (one sort_order = its priority).
     for (let i = 0; i < ordered_ids.length; i++) {
-      await q('UPDATE orders SET sort_order = $1, updated_at = now() WHERE id = $2 AND stage = $3',
-        [i, ordered_ids[i], stage]);
+      await q('UPDATE orders SET sort_order = $1, updated_at = now() WHERE id = $2',
+        [i, ordered_ids[i]]);
     }
     await logActivity(q, {
       orderId: (set_importance && set_importance.id) || null, userId: req.user.id, action: 'orders_reordered',
