@@ -50,4 +50,24 @@ router.delete('/holidays/:id', authenticate, authorize('super_admin', 'admin'), 
   res.json({ message: 'Holiday removed' });
 }));
 
+// POST /api/settings/holidays/bulk (admin) — import many at once from a CSV/Excel
+// upload (parsed client-side to {date,name}). Skips dates that already exist, so
+// re-importing the same file is safe.
+router.post('/holidays/bulk', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
+  const list = Array.isArray(req.body.holidays) ? req.body.holidays : [];
+  let inserted = 0, skipped = 0;
+  for (const h of list) {
+    const date = h && h.date;
+    const name = ((h && h.name) || '').toString().trim();
+    if (!date || !name) { skipped++; continue; }
+    const r = await query(
+      `INSERT INTO holidays (id, date, name)
+       SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM holidays WHERE date = $2)`,
+      [uuidv4(), date, name]
+    );
+    if (r.rowCount > 0) inserted++; else skipped++;
+  }
+  res.json({ inserted, skipped });
+}));
+
 module.exports = router;
