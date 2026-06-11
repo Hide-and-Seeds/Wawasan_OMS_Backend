@@ -268,17 +268,16 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
     WHERE o.stage NOT IN ('delivered','cancelled')
     ${weekFilter}
     ORDER BY
-      CASE o.importance WHEN 'vip' THEN 0 WHEN 'priority' THEN 1 ELSE 2 END,
       (o.sort_order IS NULL),
       o.sort_order ASC,
-      CASE o.priority WHEN 'urgent' THEN 0 ELSE 1 END,
+      o.required_delivery_date ASC NULLS LAST,
       o.invoice_number ASC
   `;
 
   const allOrders = (await query(sql)).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
   // Production-floor roles must not see the customer, so scrub like the list and
-  // detail endpoints do. The board card falls back to the importance tier when
+  // detail endpoints do. The board card falls back to the item count when
   // customer_name is null, so the UI stays intact for those roles.
   for (const o of allOrders) {
     if (board[o.stage]) board[o.stage].push(scrubCustomer(o, req.user.role));
