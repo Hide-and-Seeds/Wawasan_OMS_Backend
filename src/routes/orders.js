@@ -932,27 +932,17 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   // Items are tracked by status only: not_started → in_progress → done.
   const progressing = b.status !== undefined;
 
-  // Split board — per-line stage jump: send a line back to Order or Production, or release
-  // an Order-held line straight to Packing. Supervisors only. Rewrites the board-position
-  // flags directly, then keeps the order's stage in step with its lines.
+  // Split board — send a packing line back to Production (undo a premature "Done").
+  // Supervisors only. Resets the line's completion flags, then keeps the order's stage
+  // in step with its lines.
   if (b.line_move) {
     if (!['super_admin', 'production_lead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Only a supervisor can move a line between stages' });
     }
-    let sets2, params2 = [req.params.itemId];
-    if (b.line_move === 'to_order') {
-      sets2 = "held_in_order = true, status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null";
-    } else if (b.line_move === 'to_production') {
-      sets2 = "held_in_order = false, status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null";
-    } else if (b.line_move === 'to_packing') {
-      sets2 = "held_in_order = false, status = 'done', made = true, made_at = now(), made_by = $2, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null";
-      params2 = [req.params.itemId, req.user.id];
-    } else {
-      return res.status(400).json({ error: 'Invalid line move' });
-    }
-    await query(`UPDATE order_items SET ${sets2} WHERE id = $1`, params2);
+    if (b.line_move !== 'to_production') return res.status(400).json({ error: 'Invalid line move' });
+    await query("UPDATE order_items SET held_in_order = false, status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null WHERE id = $1", [req.params.itemId]);
     await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'line_moved',
-      details: `${item.sku} — ${item.name} → ${b.line_move.replace('to_', '')}`, ipAddress: req.ip || null });
+      details: `${item.sku} — ${item.name} → production`, ipAddress: req.ip || null });
     if (ord && (ord.stage === 'production' || ord.stage === 'packing')) {
       const c = (await query("SELECT COUNT(*) FILTER (WHERE NOT made)::int AS unmade, COUNT(*)::int AS total FROM order_items WHERE order_id = $1", [ord.id])).rows[0];
       const target = c.total > 0 && c.unmade === 0 ? 'packing' : 'production';
