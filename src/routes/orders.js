@@ -262,7 +262,11 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND (CASE WHEN o.stage = 'packing' THEN pack_made ELSE made END)) AS made_count,
       (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status,
-      EXISTS(SELECT 1 FROM activity_log al WHERE al.order_id = o.id AND al.action = 'item_edited') AS edited
+      EXISTS(SELECT 1 FROM activity_log al WHERE al.order_id = o.id AND al.action = 'item_edited') AS edited,
+      COALESCE((SELECT json_agg(json_build_object(
+        'id', oi.id, 'sku', oi.sku, 'name', oi.name, 'quantity', oi.quantity, 'unit', oi.unit,
+        'made', oi.made, 'pack_made', oi.pack_made, 'status', oi.status, 'pack_status', oi.pack_status
+      ) ORDER BY oi.id) FROM order_items oi WHERE oi.order_id = o.id), '[]'::json) AS items
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
     WHERE o.stage NOT IN ('delivered','cancelled')
@@ -903,12 +907,28 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
   if (editingFields && !canAmend) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct STKs/quantities in SQL Account.' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
-  // Stage staff may only record progress while the order sits in the stage they own.
+  // Which completion track this write targets — production (made/status) or packing
+  // (pack_made/pack_status). Defaults to the order's stage, so callers that send no
+  // `track` keep their exact old behaviour; the split board sends it explicitly so a
+  // made item can be packed while a sibling line is still in production.
+  const track = b.track === 'packing' ? 'packing'
+    : b.track === 'production' ? 'production'
+    : (ord && ord.stage === 'packing' ? 'packing' : 'production');
+  // Stage staff may record progress on the track they own while the order is active
+  // (in production or packing). Item-centric, so one order can be worked in both at once.
   if (progressing && !isManager) {
-    const PROGRESS_STAGES = { production_lead: ['production', 'packing'], production_staff: ['production'], packing_staff: ['packing'] };
-    if (!ord || !(PROGRESS_STAGES[req.user.role] || []).includes(ord.stage)) {
+    const active = ord && (ord.stage === 'production' || ord.stage === 'packing');
+    const PROD_ROLES = ['production_lead', 'production_staff'];
+    const PACK_ROLES = ['production_lead', 'packing_staff'];
+    const roleOk = (track === 'packing' ? PACK_ROLES : PROD_ROLES).includes(req.user.role);
+    if (!active || !roleOk) {
       return res.status(403).json({ error: 'You can only update items while the order is in your stage' });
     }
+  }
+  // A line can't be packed before it's produced. Only enforced for explicit packing
+  // writes from the split board; the normal packing-stage flow is left unchanged.
+  if (progressing && b.track === 'packing' && b.status !== 'not_started' && !item.made) {
+    return res.status(409).json({ error: 'Produce this item before packing it.' });
   }
 
   const sets = [];
@@ -922,11 +942,10 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
 
   if (progressing) {
     const status = b.status;
-    // Write to the column set for the stage the order is in: packing → pack_*,
-    // everything else → production columns. Keep the matching `made` boolean in
-    // sync so board/floor "SKUs done" counts keep working.
-    const packing = ord && ord.stage === 'packing';
-    const col = packing
+    // Write to the column set for the chosen track: packing → pack_*, production →
+    // the production columns. Keep the matching `made` boolean in sync so the board /
+    // floor "SKUs done" counts keep working.
+    const col = track === 'packing'
       ? { s: 'pack_status', m: 'pack_made', at: 'pack_made_at', by: 'pack_made_by' }
       : { s: 'status', m: 'made', at: 'made_at', by: 'made_by' };
     sets.push(`${col.s} = $${vals.push(status)}`);
