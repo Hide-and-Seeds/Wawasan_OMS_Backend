@@ -150,6 +150,9 @@ async function ensureItemColumns() {
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_made boolean NOT NULL DEFAULT false');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_made_at timestamptz');
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_made_by uuid REFERENCES users(id)');
+  // Split board — a line individually parked back in the Order column (sent back from
+  // Production/Packing, or not yet released). Overrides the made/pack board placement.
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS held_in_order boolean NOT NULL DEFAULT false');
   // Backfill status from the legacy made / made_qty fields (one-time; cheap no-op afterwards).
   await query("UPDATE order_items SET status = CASE WHEN made THEN 'done' WHEN made_qty > 0 THEN 'in_progress' ELSE 'not_started' END WHERE status = 'not_started' AND (made = true OR made_qty > 0)");
   _itemColsReady = true;
@@ -265,7 +268,8 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       EXISTS(SELECT 1 FROM activity_log al WHERE al.order_id = o.id AND al.action = 'item_edited') AS edited,
       COALESCE((SELECT json_agg(json_build_object(
         'id', oi.id, 'sku', oi.sku, 'name', oi.name, 'quantity', oi.quantity, 'unit', oi.unit,
-        'made', oi.made, 'pack_made', oi.pack_made, 'status', oi.status, 'pack_status', oi.pack_status
+        'made', oi.made, 'pack_made', oi.pack_made, 'status', oi.status, 'pack_status', oi.pack_status,
+        'held_in_order', oi.held_in_order
       ) ORDER BY oi.id) FROM order_items oi WHERE oi.order_id = o.id), '[]'::json) AS items
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
@@ -689,6 +693,10 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
     // card into the next column).
     await q('UPDATE orders SET stage = $1, pic_id = NULL, sort_order = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
 
+    // A whole-order stage move pulls every line with it — clear any per-line "held in
+    // Order" parking so no line is stranded in the Order column behind the order.
+    await q('UPDATE order_items SET held_in_order = false WHERE order_id = $1', [order.id]);
+
     // Moving an order BACKWARD a stage resets the line flags for the stage(s) being
     // undone, so each line returns to the stage the order moved back to (no line left
     // stranded in a column ahead of the order's stage on the split board). Forward moves
@@ -923,6 +931,36 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
   // Items are tracked by status only: not_started → in_progress → done.
   const progressing = b.status !== undefined;
+
+  // Split board — per-line stage jump: send a line back to Order or Production, or release
+  // an Order-held line straight to Packing. Supervisors only. Rewrites the board-position
+  // flags directly, then keeps the order's stage in step with its lines.
+  if (b.line_move) {
+    if (!['super_admin', 'production_lead'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Only a supervisor can move a line between stages' });
+    }
+    let sets2, params2 = [req.params.itemId];
+    if (b.line_move === 'to_order') {
+      sets2 = "held_in_order = true, status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null";
+    } else if (b.line_move === 'to_production') {
+      sets2 = "held_in_order = false, status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null";
+    } else if (b.line_move === 'to_packing') {
+      sets2 = "held_in_order = false, status = 'done', made = true, made_at = now(), made_by = $2, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null";
+      params2 = [req.params.itemId, req.user.id];
+    } else {
+      return res.status(400).json({ error: 'Invalid line move' });
+    }
+    await query(`UPDATE order_items SET ${sets2} WHERE id = $1`, params2);
+    await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'line_moved',
+      details: `${item.sku} — ${item.name} → ${b.line_move.replace('to_', '')}`, ipAddress: req.ip || null });
+    if (ord && (ord.stage === 'production' || ord.stage === 'packing')) {
+      const c = (await query("SELECT COUNT(*) FILTER (WHERE NOT made)::int AS unmade, COUNT(*)::int AS total FROM order_items WHERE order_id = $1", [ord.id])).rows[0];
+      const target = c.total > 0 && c.unmade === 0 ? 'packing' : 'production';
+      if (target !== ord.stage) await query('UPDATE orders SET stage = $1, updated_at = now() WHERE id = $2', [target, ord.id]);
+    }
+    return res.json({ ok: true });
+  }
+
   if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
   if (editingFields && !canAmend) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct STKs/quantities in SQL Account.' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
