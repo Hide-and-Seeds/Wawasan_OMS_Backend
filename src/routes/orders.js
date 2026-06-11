@@ -301,6 +301,40 @@ router.get('/skus', authenticate, asyncHandler(async (req, res) => {
   res.json(rows);
 }));
 
+// Suggest the next free manual invoice number derived from a taken one, e.g.
+// INV-26-0001 -> INV-26-0002. Keeps the prefix + zero-pad width; if the code has
+// no trailing number it appends -2, -3, … Powers the New Order form's one-tap
+// "use next free number" so a duplicate never dead-ends the user.
+async function nextFreeInvoice(code) {
+  const m = String(code).match(/^(.*?)(\d+)$/);
+  let prefix, width, start;
+  if (m) { prefix = m[1]; width = m[2].length; start = parseInt(m[2], 10) + 1; }
+  else { prefix = code + '-'; width = 1; start = 2; }
+  const likePrefix = prefix.replace(/([%_\\])/g, '\\$1');
+  const taken = new Set(
+    (await query(`SELECT invoice_number FROM orders WHERE invoice_number LIKE $1 ESCAPE '\\'`, [likePrefix + '%']))
+      .rows.map((r) => r.invoice_number)
+  );
+  for (let n = start; n < start + 100000; n++) {
+    const cand = prefix + String(n).padStart(width, '0');
+    if (!taken.has(cand)) return cand;
+  }
+  return prefix + Date.now();
+}
+
+// GET /api/orders/check-invoice?code=XXX — is this manual invoice number already
+// taken? Lets the New Order form warn BEFORE save (who owns it, what stage, and
+// the next free number) instead of the user hitting a blind 409 on submit.
+// super_admin only — mirrors manual create. Registered before /:id so the literal
+// path wins.
+router.get('/check-invoice', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+  const code = String(req.query.code || '').trim();
+  if (!code) return res.json({ code: '', exists: false });
+  const hit = (await query('SELECT id, customer_name, stage FROM orders WHERE invoice_number = $1', [code])).rows[0];
+  if (!hit) return res.json({ code, exists: false });
+  res.json({ code, exists: true, id: hit.id, customer_name: hit.customer_name, stage: hit.stage, suggestion: await nextFreeInvoice(code) });
+}));
+
 // GET /api/orders/:id
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   await ensureImportance();
@@ -375,8 +409,8 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   }
 
   // Duplicate check
-  const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [code])).rows[0];
-  if (existing) return res.status(409).json({ error: `Invoice ${code} already exists` });
+  const existing = (await query('SELECT id, customer_name FROM orders WHERE invoice_number = $1', [code])).rows[0];
+  if (existing) return res.status(409).json({ error: `Invoice ${code} already exists`, existing_id: existing.id, existing_customer: existing.customer_name });
 
   const orderId = uuidv4();
   const initialStage = skip_production ? 'packing' : 'order';
