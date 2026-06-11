@@ -689,6 +689,19 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
     // card into the next column).
     await q('UPDATE orders SET stage = $1, pic_id = NULL, sort_order = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
 
+    // Moving an order BACKWARD a stage resets the line flags for the stage(s) being
+    // undone, so each line returns to the stage the order moved back to (no line left
+    // stranded in a column ahead of the order's stage on the split board). Forward moves
+    // never reset, so packing started early on the split board survives advancing.
+    const RANK = { order: 0, production: 1, packing: 2, ready_for_delivery: 3, delivered: 4 };
+    if (RANK[to_stage] != null && RANK[fromStage] != null && RANK[to_stage] < RANK[fromStage]) {
+      if (RANK[to_stage] <= RANK.production) {
+        await q("UPDATE order_items SET status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null WHERE order_id = $1", [order.id]);
+      } else if (to_stage === 'packing') {
+        await q("UPDATE order_items SET pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null WHERE order_id = $1", [order.id]);
+      }
+    }
+
     await q('INSERT INTO stage_transitions (id, order_id, from_stage, to_stage, transitioned_by, reason) VALUES ($1, $2, $3, $4, $5, $6)',
       [uuidv4(), order.id, fromStage, to_stage, req.user.id, reason || null]);
 
