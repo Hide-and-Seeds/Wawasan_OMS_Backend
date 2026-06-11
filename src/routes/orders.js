@@ -367,11 +367,17 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const rawItems = (await query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY created_at', [order.id])).rows;
-  // While an order sits in packing, surface the packing progress as the live status
-  // (production progress is preserved in the pack_*-less columns and in reports).
-  const items = order.stage === 'packing'
-    ? rawItems.map((it) => ({ ...it, status: it.pack_status, made: it.pack_made, made_at: it.pack_made_at, made_by: it.pack_made_by }))
-    : rawItems;
+  // Expose both tracks explicitly so the split board / detail can show each line's
+  // production AND packing progress. `status`/`made` stay stage-mapped (packing surfaces
+  // packing progress) for the legacy single-status UI; prod_* / pack_* are the raw values.
+  const items = rawItems.map((it) => ({
+    ...it,
+    prod_status: it.status, prod_made: it.made,
+    pack_status: it.pack_status, pack_made: it.pack_made,
+    ...(order.stage === 'packing'
+      ? { status: it.pack_status, made: it.pack_made, made_at: it.pack_made_at, made_by: it.pack_made_by }
+      : {}),
+  }));
   const attachments = (await query(`
     SELECT a.*, u.name AS uploaded_by_name FROM order_attachments a
     JOIN users u ON a.uploaded_by = u.id
@@ -957,6 +963,15 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
 
   const idIdx = vals.push(req.params.itemId);
   await query(`UPDATE order_items SET ${sets.join(', ')} WHERE id = $${idIdx}`, vals);
+  // Split board: keep the order's stage in step with its lines — 'production' while any
+  // line is unproduced, 'packing' once all are produced. Never auto-advances to Ready
+  // (that stays the gated whole-order move). Only for split-aware writes (a `track` is
+  // sent), so the legacy single-status flow keeps its manual stage moves untouched.
+  if (progressing && b.track && ord && (ord.stage === 'production' || ord.stage === 'packing')) {
+    const c = (await query("SELECT COUNT(*) FILTER (WHERE NOT made)::int AS unmade, COUNT(*)::int AS total FROM order_items WHERE order_id = $1", [ord.id])).rows[0];
+    const target = c.total > 0 && c.unmade === 0 ? 'packing' : 'production';
+    if (target !== ord.stage) await query('UPDATE orders SET stage = $1, updated_at = now() WHERE id = $2', [target, ord.id]);
+  }
   let action = 'item_edited';
   if (progressing) action = b.status === 'done' ? 'item_made' : b.status === 'in_progress' ? 'item_progress' : 'item_reopened';
   await logActivity(query, {
