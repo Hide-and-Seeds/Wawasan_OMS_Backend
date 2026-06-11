@@ -69,6 +69,26 @@ router.get('/me', authenticate, (req, res) => {
   res.json({ user: req.user });
 });
 
+// POST /api/auth/refresh — issue a fresh token for the current session.
+// The Floor Display wall view calls this with { kiosk: true } so the always-on
+// TV never logs out (a long-lived token). Everyone else gets the usual window.
+router.post('/refresh', authenticate, asyncHandler(async (req, res) => {
+  let expiresIn;
+  if (req.body && req.body.kiosk) {
+    expiresIn = '30d';
+  } else {
+    const timeoutRow = (await query("SELECT value FROM system_settings WHERE key = 'session_timeout_hours'")).rows[0];
+    const hours = Math.max(1, parseInt(timeoutRow && timeoutRow.value, 10) || parseInt(process.env.JWT_EXPIRES_IN, 10) || 8);
+    expiresIn = `${hours}h`;
+  }
+  const token = jwt.sign(
+    { userId: req.user.id, role: req.user.role },
+    process.env.JWT_SECRET,
+    { expiresIn }
+  );
+  res.json({ token });
+}));
+
 // Password changes are admin-driven only for the factory deployment:
 // Boss / Ops / Admin set any user's password via PATCH /api/users/:id.
 // Self-service change-password and the email forgot/reset flow were removed.

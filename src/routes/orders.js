@@ -649,6 +649,19 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
 
   const fromStage = order.stage;
 
+  // Hard gate: an order may only enter Ready for Delivery once every line item is
+  // packed (pack_made). Applies to everyone (Boss included) — "ready" must mean packed.
+  // pack_made is the packing-stage completion flag the board/floor counts already use.
+  if (to_stage === 'ready_for_delivery') {
+    const it = (await query(
+      "SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE pack_made = false)::int AS pending FROM order_items WHERE order_id = $1",
+      [order.id]
+    )).rows[0];
+    if (it.total > 0 && it.pending > 0) {
+      return res.status(409).json({ error: `Cannot move to Ready for Delivery — ${it.pending} of ${it.total} item(s) not yet packed.` });
+    }
+  }
+
   // Managers move freely; stage staff may only advance their own stage forward one step.
   if (!['super_admin'].includes(req.user.role)) {
     if (order.on_hold) return res.status(403).json({ error: 'Order is on hold' });

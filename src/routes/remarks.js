@@ -6,10 +6,13 @@ const { query, withTransaction } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-const ALLOWED_ROLES = ['super_admin', 'production_lead'];
+// Production staff may READ the weekly remarks (they're the audience); only the
+// lead and owners may WRITE them.
+const READ_ROLES = ['super_admin', 'production_lead', 'production_staff'];
+const WRITE_ROLES = ['super_admin', 'production_lead'];
 
 // GET /api/remarks — list all remarks
-router.get('/', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (req, res) => {
+router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
   const remarks = (await query(`
     SELECT r.*, u.name AS author_name FROM production_remarks r
     JOIN users u ON r.author_id = u.id
@@ -19,7 +22,7 @@ router.get('/', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (r
 }));
 
 // GET /api/remarks/current — current week (Monday-anchored)
-router.get('/current', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (req, res) => {
+router.get('/current', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
   const remark = (await query(`
     SELECT r.*, u.name AS author_name FROM production_remarks r
     JOIN users u ON r.author_id = u.id
@@ -30,7 +33,7 @@ router.get('/current', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(a
 }));
 
 // POST /api/remarks
-router.post('/', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (req, res) => {
+router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (req, res) => {
   const { content, week_start } = req.body;
   if (!content) return res.status(400).json({ error: 'Content is required' });
 
@@ -52,15 +55,17 @@ router.post('/', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (
       VALUES ($1, $2, $3, $4, $5)
     `, [id, req.user.id, wStart, wEnd, content]);
 
-    // Notify all super admins
-    const admins = (await q("SELECT id FROM users WHERE role = 'super_admin' AND is_active = true")).rows;
-    for (const admin of admins) {
-      if (admin.id !== req.user.id) {
-        await q(`
-          INSERT INTO notifications (id, user_id, type, title, message)
-          VALUES ($1, $2, 'weekly_remark', 'New Weekly Remark', $3)
-        `, [uuidv4(), admin.id, `${req.user.name} posted weekly remarks for w/c ${wStart}`]);
-      }
+    // Notify the audience: owners + the whole production team (lead & staff), minus the author.
+    const recipients = (await q(
+      "SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true",
+      [['super_admin', 'production_lead', 'production_staff']]
+    )).rows;
+    for (const r of recipients) {
+      if (r.id === req.user.id) continue;
+      await q(`
+        INSERT INTO notifications (id, user_id, type, title, message)
+        VALUES ($1, $2, 'weekly_remark', 'New Weekly Remark', $3)
+      `, [uuidv4(), r.id, `${req.user.name} posted weekly remarks for w/c ${wStart}`]);
     }
   });
 
@@ -68,7 +73,7 @@ router.post('/', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (
 }));
 
 // PATCH /api/remarks/:id
-router.patch('/:id', authenticate, authorize(...ALLOWED_ROLES), asyncHandler(async (req, res) => {
+router.patch('/:id', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (req, res) => {
   const remark = (await query('SELECT * FROM production_remarks WHERE id = $1', [req.params.id])).rows[0];
   if (!remark) return res.status(404).json({ error: 'Not found' });
   if (remark.author_id !== req.user.id && req.user.role !== 'super_admin') {
