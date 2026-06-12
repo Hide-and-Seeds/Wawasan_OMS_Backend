@@ -780,9 +780,9 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/orders/:id/assign-pic
 router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
-  // Boss, Ops, or back-office Admin (deputy) may set the PIC. (Not canMoveOrders —
-  // that gate also guards order delete, which Admin must NOT have.)
-  if (!['super_admin', 'admin'].includes(req.user.role)) {
+  // Boss, back-office Admin (deputy), or the Production Head may set the PIC. (Not
+  // canMoveOrders — that gate also guards order delete, which they must NOT have.)
+  if (!['super_admin', 'admin', 'production_lead'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
   const { pic_id } = req.body;

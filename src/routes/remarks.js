@@ -6,9 +6,9 @@ const { query, withTransaction } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-// Production staff may READ the weekly remarks (they're the audience); only the
+// The lead, owners and the back-office Admin may READ the weekly remarks; only the
 // lead and owners may WRITE them.
-const READ_ROLES = ['super_admin', 'production_lead', 'production_staff', 'admin'];
+const READ_ROLES = ['super_admin', 'production_lead', 'admin'];
 const WRITE_ROLES = ['super_admin', 'production_lead'];
 
 // GET /api/remarks — list all remarks
@@ -55,10 +55,11 @@ router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (re
       VALUES ($1, $2, $3, $4, $5)
     `, [id, req.user.id, wStart, wEnd, content]);
 
-    // Notify the audience: owners + the whole production team (lead & staff), minus the author.
+    // Notify the audience: owners + the production lead, minus the author. (Production
+    // staff no longer read remarks, so they're not notified.)
     const recipients = (await q(
       "SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true",
-      [['super_admin', 'production_lead', 'production_staff']]
+      [['super_admin', 'production_lead']]
     )).rows;
     for (const r of recipients) {
       if (r.id === req.user.id) continue;
