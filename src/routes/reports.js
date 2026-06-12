@@ -239,8 +239,19 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     LEFT JOIN deliverers dl ON d.deliverer_id = dl.id
     LEFT JOIN users u ON d.delivery_man_id = u.id
     JOIN orders o ON d.order_id = o.id
-    WHERE d.status = 'delivered' ${dateFilter}
+    WHERE d.status = 'delivered' AND COALESCE(d.channel, 'in_house') = 'in_house' ${dateFilter}
     GROUP BY COALESCE(dl.id, u.id), COALESCE(dl.name, u.name) ORDER BY total DESC
+  `, params)).rows;
+
+  // How it shipped: own van vs marketplace courier hand-off (Shopee SPX / Lazada LEX).
+  const byChannel = (await query(`
+    SELECT COALESCE(d.channel, 'in_house') AS channel,
+      COUNT(*)::int AS total,
+      SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
+    FROM deliveries d
+    JOIN orders o ON d.order_id = o.id
+    WHERE d.status = 'delivered' ${dateFilter}
+    GROUP BY COALESCE(d.channel, 'in_house') ORDER BY total DESC
   `, params)).rows;
 
   // Live snapshot, not period-bound: deliveries still out, and ones that failed.
@@ -263,6 +274,7 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     pending_count: pending.count,
     failed_count: failed.count,
     by_delivery_man: byDeliveryMan,
+    by_channel: byChannel,
     daily_trend: dailyTrend
   });
 }));
@@ -541,12 +553,21 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
     : '';
 
   const pics = (await query(`
-    WITH wl AS (
-      SELECT pic_id AS uid,
-        COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled'))::int AS active,
-        COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND required_delivery_date < CURRENT_DATE)::int AS overdue,
-        COUNT(*) FILTER (WHERE on_hold)::int AS on_hold
-      FROM orders WHERE pic_id IS NOT NULL GROUP BY pic_id
+    WITH pic_orders AS (
+      -- One row per (owner, order) for each PIC track, so a person's workload counts
+      -- the orders they own as Production PIC (pic_id) and as Packing PIC (packing_pic_id).
+      SELECT pic_id AS uid, id, stage, required_delivery_date, on_hold, 'production'::text AS track FROM orders WHERE pic_id IS NOT NULL
+      UNION ALL
+      SELECT packing_pic_id AS uid, id, stage, required_delivery_date, on_hold, 'packing'::text AS track FROM orders WHERE packing_pic_id IS NOT NULL
+    ),
+    wl AS (
+      SELECT uid,
+        COUNT(DISTINCT id) FILTER (WHERE stage NOT IN ('delivered','cancelled'))::int AS active,
+        COUNT(DISTINCT id) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND track = 'production')::int AS active_prod,
+        COUNT(DISTINCT id) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND track = 'packing')::int AS active_pack,
+        COUNT(DISTINCT id) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND required_delivery_date < CURRENT_DATE)::int AS overdue,
+        COUNT(DISTINCT id) FILTER (WHERE on_hold)::int AS on_hold
+      FROM pic_orders GROUP BY uid
     ),
     done AS (
       SELECT st.transitioned_by AS uid, COUNT(*)::int AS completed
@@ -556,6 +577,8 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
     )
     SELECT u.id, u.name, u.role, u.avatar_color,
       COALESCE(w.active, 0) AS active,
+      COALESCE(w.active_prod, 0) AS active_prod,
+      COALESCE(w.active_pack, 0) AS active_pack,
       COALESCE(w.overdue, 0) AS overdue,
       COALESCE(w.on_hold, 0) AS on_hold,
       COALESCE(d.completed, 0) AS completed
