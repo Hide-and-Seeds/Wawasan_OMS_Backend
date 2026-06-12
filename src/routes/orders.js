@@ -587,8 +587,8 @@ router.post('/import', authenticate, authorize('super_admin'), uploadCsvSingle('
 // PATCH /api/orders/:id — edit order details
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   const isManager = ['super_admin'].includes(req.user.role);
-  // Back-office Admin (deputy) may triage routing — priority / importance only.
-  // Customer details, dates and notes stay Boss/Ops; PIC is set via assign-pic.
+  // Back-office Admin (deputy) may triage routing + the delivery/expiry dates.
+  // Customer details and notes stay Boss/Ops; PIC is set via assign-pic.
   const isAdmin = req.user.role === 'admin';
   if (!isManager && !isAdmin) {
     return res.status(403).json({ error: 'Insufficient permissions' });
@@ -604,7 +604,7 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 
   const fields = isManager
     ? ['customer_name', 'customer_contact', 'required_delivery_date', 'expiry_date', 'priority', 'importance', 'notes', 'pic_id', 'delivery_address']
-    : ['priority', 'importance'];
+    : ['priority', 'importance', 'required_delivery_date', 'expiry_date'];
   const updates = [];
   const values = [];
 
@@ -760,6 +760,23 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
           title: `Order ${order.invoice_number} is now in ${stageName(to_stage)}`,
           message: `Moved by ${req.user.name}`,
           orderId: order.id
+        });
+      }
+    }
+
+    // PIC is no longer assigned on the "Send to production" modal, so when an order
+    // enters Production / Packing with no PIC for that track, nudge the Production Lead
+    // + Admin (loud) to assign one.
+    const needPicCol = to_stage === 'production' ? 'pic_id' : to_stage === 'packing' ? 'packing_pic_id' : null;
+    if (needPicCol && !order[needPicCol]) {
+      const assigners = (await q("SELECT id FROM users WHERE role IN ('production_lead','admin') AND is_active = true")).rows;
+      for (const u of assigners) {
+        if (u.id === req.user.id) continue;
+        await notify(q, {
+          userId: u.id, type: 'order_stage_entered',
+          title: `Order ${order.invoice_number} → ${stageName(to_stage)} · assign a PIC`,
+          message: `Please assign a ${to_stage === 'packing' ? 'packing' : 'production'} PIC.`,
+          orderId: order.id, loud: true
         });
       }
     }
