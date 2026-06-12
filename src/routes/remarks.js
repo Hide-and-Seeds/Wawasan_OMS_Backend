@@ -9,7 +9,8 @@ const asyncHandler = require('../utils/asyncHandler');
 // The lead, owners and the back-office Admin may READ the weekly remarks; only the
 // lead and owners may WRITE them.
 const READ_ROLES = ['super_admin', 'production_lead', 'admin'];
-const WRITE_ROLES = ['super_admin', 'production_lead'];
+// Only the Production Head writes the weekly remark; the Boss writes the monthly summary.
+const WRITE_ROLES = ['production_lead'];
 
 // GET /api/remarks — list all remarks
 router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
