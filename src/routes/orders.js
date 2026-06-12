@@ -850,8 +850,9 @@ router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'product
   res.json({ ok: true, count: ordered_ids.length });
 }));
 
-// PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags
-router.patch('/:id/flags', authenticate, authorize('super_admin', 'production_lead'), asyncHandler(async (req, res) => {
+// PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags.
+// admin (deputy) may hold (soft, reversible); cancel + stage moves stay Boss-only.
+router.patch('/:id/flags', authenticate, authorize('super_admin', 'production_lead', 'admin'), asyncHandler(async (req, res) => {
   await ensureOrderFlags();
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });

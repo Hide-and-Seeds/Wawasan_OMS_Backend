@@ -5,16 +5,15 @@ const { query } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-const ADMIN_ROLES = ['super_admin'];
-// Back-office Admin (deputy) gets the read-only Dashboard overview — but NOT the
-// detailed Reports tabs (those stay Boss / Lead).
+// Back-office Admin (deputy) reads every report (read-only), same as Boss — Admin
+// already sees customer names on the Dashboard, so Reports exposes nothing extra.
+const ADMIN_ROLES = ['super_admin', 'admin'];
 const DASHBOARD_ROLES = ['super_admin', 'admin'];
 // Production Lead (floor supervisor) may see the name-free reports: production,
-// packing, and the per-person staff / person-in-charge tables. Orders and the
-// dashboard stay Boss only — they list customer names. Delivery is the
-// coordinator's domain, not the lead's.
-const PROD_REPORT_ROLES = ['super_admin', 'production_lead'];
-const DELIVERY_REPORT_ROLES = ['super_admin'];
+// packing, efficiency, and the per-person staff / person-in-charge tables. Admin
+// (deputy) is included here too so it can read every report.
+const PROD_REPORT_ROLES = ['super_admin', 'production_lead', 'admin'];
+const DELIVERY_REPORT_ROLES = ['super_admin', 'admin'];
 
 // GET /api/reports/dashboard — boss overview
 router.get('/dashboard', authenticate, authorize(...DASHBOARD_ROLES), asyncHandler(async (req, res) => {
