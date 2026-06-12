@@ -8,7 +8,7 @@ const asyncHandler = require('../utils/asyncHandler');
 
 // Production staff may READ the weekly remarks (they're the audience); only the
 // lead and owners may WRITE them.
-const READ_ROLES = ['super_admin', 'production_lead', 'production_staff'];
+const READ_ROLES = ['super_admin', 'production_lead', 'production_staff', 'admin'];
 const WRITE_ROLES = ['super_admin', 'production_lead'];
 
 // GET /api/remarks — list all remarks

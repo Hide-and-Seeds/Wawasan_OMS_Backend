@@ -575,7 +575,7 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
 // GET /api/reports/efficiency — flow health: end-to-end cycle time, on-time rate,
 // the bottleneck stage (longest avg dwell) and aging WIP (oldest open orders).
 // Boss/Ops only (spans delivery). Invoice numbers only — no customer names.
-router.get('/efficiency', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/efficiency', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const win = (col) => {
     if (from && to) return `AND ${col} BETWEEN $1 AND $2`;
