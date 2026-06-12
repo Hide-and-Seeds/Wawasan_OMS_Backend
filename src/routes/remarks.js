@@ -12,11 +12,24 @@ const READ_ROLES = ['super_admin', 'production_lead', 'admin'];
 // Only the Production Head writes the weekly remark; the Boss writes the monthly summary.
 const WRITE_ROLES = ['production_lead'];
 
-// GET /api/remarks — list all remarks
+// Archive tables (column mirrors). The pg_cron jobs move old remarks here
+// (weekly: past weeks; quarterly: months > 3mo) so the live tables stay lean but
+// nothing is lost — the reads below union them back so full history still shows.
+async function ensureArchives() {
+  await query('CREATE TABLE IF NOT EXISTS production_remarks_archive (LIKE production_remarks)');
+  await ensureMonthly();
+  await query('CREATE TABLE IF NOT EXISTS monthly_remarks_archive (LIKE monthly_remarks)');
+}
+
+// GET /api/remarks — list all remarks (live + archived)
 router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
+  await ensureArchives();
   const remarks = (await query(`
-    SELECT r.*, u.name AS author_name FROM production_remarks r
-    JOIN users u ON r.author_id = u.id
+    SELECT r.*, u.name AS author_name FROM (
+      SELECT * FROM production_remarks
+      UNION ALL
+      SELECT * FROM production_remarks_archive
+    ) r LEFT JOIN users u ON r.author_id = u.id
     ORDER BY r.week_start DESC
   `)).rows;
   res.json(remarks);
@@ -99,12 +112,15 @@ async function ensureMonthly() {
   )`);
 }
 
-// GET /api/remarks/monthly — list monthly summaries (same read audience as weekly)
+// GET /api/remarks/monthly — list monthly summaries (live + archived)
 router.get('/monthly', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
-  await ensureMonthly();
+  await ensureArchives();
   const rows = (await query(`
-    SELECT m.*, u.name AS author_name FROM monthly_remarks m
-    LEFT JOIN users u ON m.author_id = u.id
+    SELECT m.*, u.name AS author_name FROM (
+      SELECT * FROM monthly_remarks
+      UNION ALL
+      SELECT * FROM monthly_remarks_archive
+    ) m LEFT JOIN users u ON m.author_id = u.id
     ORDER BY m.month_start DESC
   `)).rows;
   res.json(rows);
