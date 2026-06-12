@@ -170,6 +170,10 @@ async function ensureOrderFlags() {
   // Ready list. Filled from the invoice's Delivery Address column(s) by the bridge /
   // CSV import when present; otherwise typed by staff in Dispatch.
   await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address text');
+  // Per-track PIC: pic_id stays the PRODUCTION owner; packing_pic_id is the PACKING
+  // owner. The split board shows one order in Production + Packing at once, so each
+  // track needs its own "in charge" — a single PIC couldn't represent both.
+  await query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS packing_pic_id uuid REFERENCES users(id)');
   _orderFlagsReady = true;
 }
 
@@ -206,6 +210,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { stage, priority, search, week, from, to, page = 1, limit = 50 } = req.query;
   const offset = (parseInt(page) - 1) * parseInt(limit);
   await ensureImportance();
+  await ensureOrderFlags();
 
   const where = ['1=1'];
   const params = [];
@@ -231,10 +236,12 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
   const sql = `
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
+      pu.name AS pack_pic_name, pu.avatar_color AS pack_pic_color,
       cb.name AS created_by_name,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
+    LEFT JOIN users pu ON o.packing_pic_id = pu.id
     LEFT JOIN users cb ON o.created_by = cb.id
     WHERE ${whereSql}
     ORDER BY
@@ -262,6 +269,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   const sql = `
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
+      pu.name AS pack_pic_name, pu.avatar_color AS pack_pic_color,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND (CASE WHEN o.stage = 'packing' THEN pack_made ELSE made END)) AS made_count,
       (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status,
@@ -273,6 +281,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       ) ORDER BY oi.id) FROM order_items oi WHERE oi.order_id = o.id), '[]'::json) AS items
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
+    LEFT JOIN users pu ON o.packing_pic_id = pu.id
     WHERE o.stage NOT IN ('delivered','cancelled')
     ${weekFilter}
     ORDER BY
@@ -360,10 +369,14 @@ router.get('/check-invoice', authenticate, authorize('super_admin'), asyncHandle
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   await ensureImportance();
   await ensureItemColumns();
+  await ensureOrderFlags();
   const order = (await query(`
-    SELECT o.*, u.name AS pic_name, u.avatar_color AS pic_color, cb.name AS created_by_name
+    SELECT o.*, u.name AS pic_name, u.avatar_color AS pic_color,
+      pu.name AS pack_pic_name, pu.avatar_color AS pack_pic_color,
+      cb.name AS created_by_name
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
+    LEFT JOIN users pu ON o.packing_pic_id = pu.id
     LEFT JOIN users cb ON o.created_by = cb.id
     WHERE o.id = $1
   `, [req.params.id])).rows[0];
@@ -688,10 +701,11 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   }
 
   await withTransaction(async (q) => {
-    // Clear the PIC + any manual board ordering on a stage change (the next stage's
-    // owner is assigned fresh, and a pinned Production position shouldn't follow the
-    // card into the next column).
-    await q('UPDATE orders SET stage = $1, pic_id = NULL, sort_order = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
+    // Clear any manual board ordering on a stage change (a pinned Production position
+    // shouldn't follow the card into the next column). PICs are now per-track records
+    // (production = pic_id, packing = packing_pic_id) and persist across the move — each
+    // is reassignable in the detail panel and just stops showing past its own column.
+    await q('UPDATE orders SET stage = $1, sort_order = NULL, updated_at = now() WHERE id = $2', [to_stage, order.id]);
 
     // A whole-order stage move pulls every line with it — clear any per-line "held in
     // Order" parking so no line is stranded in the Order column behind the order.
@@ -785,8 +799,12 @@ router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
   if (!['super_admin', 'admin', 'production_lead'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
-  const { pic_id } = req.body;
+  // track selects which owner to set: production (pic_id, default) or packing
+  // (packing_pic_id). Whitelisted to a real column name so it's safe to interpolate.
+  const { pic_id, track = 'production' } = req.body;
+  const col = track === 'packing' ? 'packing_pic_id' : 'pic_id';
 
+  await ensureOrderFlags();
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
@@ -796,18 +814,18 @@ router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
     if (!picUser || !picUser.is_active) return res.status(400).json({ error: 'PIC must be an active user' });
   }
 
-  const oldPic = order.pic_id;
+  const oldPic = order[col];
 
   await withTransaction(async (q) => {
-    await q('UPDATE orders SET pic_id = $1, updated_at = now() WHERE id = $2', [pic_id || null, order.id]);
+    await q(`UPDATE orders SET ${col} = $1, updated_at = now() WHERE id = $2`, [pic_id || null, order.id]);
 
     await logActivity(q, { orderId: order.id, userId: req.user.id, action: 'pic_assigned',
-      details: `PIC changed`, oldValue: oldPic, newValue: pic_id, ipAddress: req.ip });
+      details: `${track === 'packing' ? 'Packing' : 'Production'} PIC changed`, oldValue: oldPic, newValue: pic_id, ipAddress: req.ip });
 
     if (pic_id && pic_id !== req.user.id) {
       await notify(q, {
         userId: pic_id, type: 'pic_assigned',
-        title: `You are assigned to order ${order.invoice_number}`,
+        title: `You are the ${track === 'packing' ? 'packing' : 'production'} PIC for order ${order.invoice_number}`,
         orderId: order.id
       });
     }
