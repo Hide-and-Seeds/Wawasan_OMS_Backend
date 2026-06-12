@@ -86,4 +86,42 @@ router.patch('/:id', authenticate, authorize(...WRITE_ROLES), asyncHandler(async
   res.json({ message: 'Updated' });
 }));
 
+// ─── Monthly summary remarks (Boss-authored, one per month) ──────────────────
+async function ensureMonthly() {
+  await query(`CREATE TABLE IF NOT EXISTS monthly_remarks (
+    id uuid PRIMARY KEY,
+    month_start date UNIQUE NOT NULL,
+    content text NOT NULL,
+    author_id uuid REFERENCES users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
+}
+
+// GET /api/remarks/monthly — list monthly summaries (same read audience as weekly)
+router.get('/monthly', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
+  await ensureMonthly();
+  const rows = (await query(`
+    SELECT m.*, u.name AS author_name FROM monthly_remarks m
+    LEFT JOIN users u ON m.author_id = u.id
+    ORDER BY m.month_start DESC
+  `)).rows;
+  res.json(rows);
+}));
+
+// POST /api/remarks/monthly — write / overwrite a month's summary (Boss only).
+// Upserts on month_start so editing the current month is just another POST.
+router.post('/monthly', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+  await ensureMonthly();
+  const { content, month_start } = req.body;
+  if (!content || !content.trim()) return res.status(400).json({ error: 'Content is required' });
+  const row = (await query(`
+    INSERT INTO monthly_remarks (id, month_start, content, author_id, created_at, updated_at)
+    VALUES ($1, COALESCE($2::date, date_trunc('month', now())::date), $3, $4, now(), now())
+    ON CONFLICT (month_start) DO UPDATE SET content = EXCLUDED.content, author_id = EXCLUDED.author_id, updated_at = now()
+    RETURNING *
+  `, [uuidv4(), month_start || null, content.trim(), req.user.id])).rows[0];
+  res.json(row);
+}));
+
 module.exports = router;
