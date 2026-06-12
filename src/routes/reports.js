@@ -344,12 +344,18 @@ router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asyn
   const orders = (await query(`
     SELECT o.id, o.invoice_number, o.customer_name, o.stage, o.priority, o.importance,
       o.order_date, o.required_delivery_date, o.created_at,
-      u.name AS pic_name,
+      u.name AS pic_name, pu.name AS pack_pic_name,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id) AS item_count,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND status = 'done') AS done_count,
-      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND status = 'in_progress') AS in_progress_count
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND status = 'in_progress') AS in_progress_count,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND pack_made) AS packed_count,
+      (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND pack_status = 'in_progress') AS pack_in_progress_count,
+      (SELECT COALESCE(dl.name, du.name, CASE d.channel WHEN 'shopee' THEN 'Shopee (SPX)' WHEN 'lazada' THEN 'Lazada (LEX)' END)
+       FROM deliveries d LEFT JOIN deliverers dl ON dl.id = d.deliverer_id LEFT JOIN users du ON du.id = d.delivery_man_id
+       WHERE d.order_id = o.id AND d.status <> 'failed' ORDER BY d.created_at DESC LIMIT 1) AS carrier_name
     FROM orders o
     LEFT JOIN users u ON o.pic_id = u.id
+    LEFT JOIN users pu ON o.packing_pic_id = pu.id
     WHERE ${where.join(' AND ')}
     ORDER BY o.required_delivery_date ASC
   `, params)).rows;
@@ -384,12 +390,18 @@ router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asyn
       id: o.id, invoice_number: o.invoice_number, customer_name: o.customer_name,
       stage: o.stage, priority: o.priority, importance: o.importance,
       required_delivery_date: o.required_delivery_date, order_date: o.order_date,
-      pic_name: o.pic_name,
+      pic_name: o.pic_name, pack_pic_name: o.pack_pic_name, carrier_name: o.carrier_name,
       item_count: total, done_count: o.done_count || 0, in_progress_count: o.in_progress_count || 0,
       not_started_count: Math.max(0, total - (o.done_count || 0) - (o.in_progress_count || 0)),
       pct: total > 0 ? Math.round(((o.done_count || 0) / total) * 100) : 0,
-      days_in_stage: Math.floor((now - lastAt) / 86400000),
-      cycle_hours: hours((delivered ? lastAt : now) - firstAt),
+      // Packing track (split system): made vs packed are tracked separately per line.
+      packed_count: o.packed_count || 0, pack_in_progress_count: o.pack_in_progress_count || 0,
+      pack_not_started_count: Math.max(0, total - (o.packed_count || 0) - (o.pack_in_progress_count || 0)),
+      pack_pct: total > 0 ? Math.round(((o.packed_count || 0) / total) * 100) : 0,
+      // Clamp to ≥ 0 — a stage/cycle duration can't be negative (guards against a
+      // transition timestamped slightly in the future from a clock skew / data import).
+      days_in_stage: Math.max(0, Math.floor((now - lastAt) / 86400000)),
+      cycle_hours: Math.max(0, hours((delivered ? lastAt : now) - firstAt)),
       delivered,
       on_time: delivered && reqMs != null ? lastAt <= reqMs + 86400000 : null,
       late: !delivered && reqMs != null && reqMs < now,
