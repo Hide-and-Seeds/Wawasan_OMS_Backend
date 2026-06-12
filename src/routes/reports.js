@@ -497,18 +497,29 @@ router.get('/staff/:id', authenticate, authorize(...PROD_REPORT_ROLES), asyncHan
   `, [id])).rows;
 
   // Team benchmark: average completions + items per active person this period.
+  // This spans ALL users (no per-person id), so it can't reuse the $2/$3 windows above
+  // (those assume id is $1). Build $1/$2 windows + matching params, else a period query
+  // (0 placeholders) is called with [id] and Postgres throws a bind-parameter mismatch.
+  const winB = (col) => {
+    if (from && to) return `AND ${col} BETWEEN $1 AND $2`;
+    if (period === 'daily') return `AND ${col}::date = CURRENT_DATE`;
+    if (period === 'monthly') return `AND date_trunc('month', ${col}) = date_trunc('month', now())`;
+    return `AND date_trunc('week', ${col}) = date_trunc('week', now())`;
+  };
+  const benchParams = (from && to) ? [from, to] : [];
+  const stFB = winB('st.created_at'), madeFB = winB('oi.made_at'), packFB = winB('oi.pack_made_at');
   const bench = (await query(`
     WITH per AS (
       SELECT u.id,
-        COALESCE((SELECT COUNT(*) FROM stage_transitions st WHERE st.transitioned_by = u.id AND ${FORWARD_PAIRS} ${stF}), 0)::int AS completions,
-        COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.made_by = u.id AND oi.status = 'done' ${madeF}), 0)::int
-          + COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.pack_made_by = u.id AND oi.pack_status = 'done' ${packF}), 0)::int AS items
+        COALESCE((SELECT COUNT(*) FROM stage_transitions st WHERE st.transitioned_by = u.id AND ${FORWARD_PAIRS} ${stFB}), 0)::int AS completions,
+        COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.made_by = u.id AND oi.status = 'done' ${madeFB}), 0)::int
+          + COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.pack_made_by = u.id AND oi.pack_status = 'done' ${packFB}), 0)::int AS items
       FROM users u WHERE u.is_active = true
     )
     SELECT COALESCE(ROUND(AVG(completions), 1), 0) AS avg_completions,
            COALESCE(ROUND(AVG(items), 1), 0) AS avg_items
     FROM per WHERE completions > 0 OR items > 0
-  `, P)).rows[0];
+  `, benchParams)).rows[0];
 
   const items_total = items_made + items_packed;
   const per_active_day = work.active_days > 0 ? +(items_total / work.active_days).toFixed(1) : 0;
