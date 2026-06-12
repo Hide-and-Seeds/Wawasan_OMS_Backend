@@ -474,7 +474,7 @@ router.get('/staff/:id', authenticate, authorize(...PROD_REPORT_ROLES), asyncHan
       COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled'))::int AS active,
       COUNT(*) FILTER (WHERE stage NOT IN ('delivered','cancelled') AND required_delivery_date < CURRENT_DATE)::int AS overdue,
       COUNT(*) FILTER (WHERE on_hold)::int AS on_hold
-    FROM orders WHERE pic_id = $1
+    FROM orders WHERE pic_id = $1 OR packing_pic_id = $1
   `, [id])).rows[0];
   const ot = (await query(`
     SELECT COUNT(*)::int AS total,
