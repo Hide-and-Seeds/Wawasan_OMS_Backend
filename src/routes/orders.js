@@ -979,7 +979,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
     if (b.line_move !== 'to_production') return res.status(400).json({ error: 'Invalid line move' });
     await query("UPDATE order_items SET held_in_order = false, status = 'not_started', made = false, made_at = null, made_by = null, pack_status = 'not_started', pack_made = false, pack_made_at = null, pack_made_by = null WHERE id = $1", [req.params.itemId]);
     await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'line_moved',
-      details: `${item.sku} — ${item.name} → production`, ipAddress: req.ip || null });
+      details: `${item.sku} — ${item.name} → production`, newValue: item.sku, ipAddress: req.ip || null });
     if (ord && (ord.stage === 'production' || ord.stage === 'packing')) {
       const c = (await query("SELECT COUNT(*) FILTER (WHERE NOT made)::int AS unmade, COUNT(*)::int AS total FROM order_items WHERE order_id = $1", [ord.id])).rows[0];
       const target = c.total > 0 && c.unmade === 0 ? 'packing' : 'production';

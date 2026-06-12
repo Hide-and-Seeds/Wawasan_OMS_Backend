@@ -231,16 +231,22 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     WHERE d.status = 'delivered' AND d.delivered_at IS NOT NULL ${dateFilter}
   `, params)).rows[0];
 
-  const byDeliveryMan = (await query(`
-    SELECT COALESCE(dl.id, u.id) AS id, COALESCE(dl.name, u.name) AS name,
+  // One row per carrier — in-house drivers AND each marketplace courier (SPX / LEX) —
+  // each with a (kind,key) the carrier drill-down filters on.
+  const byCarrier = (await query(`
+    SELECT
+      CASE WHEN COALESCE(d.channel,'in_house')='in_house' THEN 'driver' ELSE 'courier' END AS kind,
+      CASE WHEN COALESCE(d.channel,'in_house')='in_house' THEN COALESCE(dl.id::text, u.id::text, 'none') ELSE d.channel END AS key,
+      CASE WHEN COALESCE(d.channel,'in_house')='in_house' THEN COALESCE(dl.name, u.name, 'Unassigned')
+           WHEN d.channel='shopee' THEN 'Shopee (SPX)' ELSE 'Lazada (LEX)' END AS name,
       COUNT(*)::int AS total,
       SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
     FROM deliveries d
     LEFT JOIN deliverers dl ON d.deliverer_id = dl.id
     LEFT JOIN users u ON d.delivery_man_id = u.id
     JOIN orders o ON d.order_id = o.id
-    WHERE d.status = 'delivered' AND COALESCE(d.channel, 'in_house') = 'in_house' ${dateFilter}
-    GROUP BY COALESCE(dl.id, u.id), COALESCE(dl.name, u.name) ORDER BY total DESC
+    WHERE d.status = 'delivered' ${dateFilter}
+    GROUP BY 1, 2, 3 ORDER BY total DESC
   `, params)).rows;
 
   // How it shipped: own van vs marketplace courier hand-off (Shopee SPX / Lazada LEX).
@@ -273,9 +279,49 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     avg_turnaround_hours: turnaround.avg_hours != null ? Number(turnaround.avg_hours).toFixed(1) : null,
     pending_count: pending.count,
     failed_count: failed.count,
-    by_delivery_man: byDeliveryMan,
+    by_carrier: byCarrier,
     by_channel: byChannel,
     daily_trend: dailyTrend
+  });
+}));
+
+// GET /api/reports/delivery/carrier — one carrier's deliveries detail (the click-through
+// from the By-carrier table): kind=driver|courier, key=deliverer/user id OR channel.
+router.get('/delivery/carrier', authenticate, authorize(...DELIVERY_REPORT_ROLES), asyncHandler(async (req, res) => {
+  const { kind, key, period = 'weekly', from, to } = req.query;
+  if (!key) return res.status(400).json({ error: 'key required' });
+
+  const params = [];
+  let dateFilter = '';
+  if (from && to) { dateFilter = 'AND d.delivered_at BETWEEN $1 AND $2'; params.push(from, to); }
+  else if (period === 'daily') dateFilter = "AND d.delivered_at::date = CURRENT_DATE";
+  else if (period === 'weekly') dateFilter = "AND date_trunc('week', d.delivered_at) = date_trunc('week', now())";
+  else if (period === 'monthly') dateFilter = "AND date_trunc('month', d.delivered_at) = date_trunc('month', now())";
+
+  const carrierFilter = kind === 'courier'
+    ? `AND d.channel = $${params.push(key)}`
+    : `AND COALESCE(d.channel,'in_house') = 'in_house' AND COALESCE(d.deliverer_id::text, d.delivery_man_id::text, 'none') = $${params.push(key)}`;
+
+  const rows = (await query(`
+    SELECT o.invoice_number, o.customer_name, o.required_delivery_date,
+      d.delivered_at, d.tracking_no,
+      (d.delivered_at::date <= o.required_delivery_date) AS on_time
+    FROM deliveries d JOIN orders o ON o.id = d.order_id
+    WHERE d.status = 'delivered' ${dateFilter} ${carrierFilter}
+    ORDER BY d.delivered_at DESC
+  `, params)).rows;
+  const avg = (await query(`
+    SELECT AVG(EXTRACT(EPOCH FROM (d.delivered_at - d.created_at)) / 3600.0) AS h
+    FROM deliveries d JOIN orders o ON o.id = d.order_id
+    WHERE d.status = 'delivered' AND d.delivered_at IS NOT NULL ${dateFilter} ${carrierFilter}
+  `, params)).rows[0];
+
+  const total = rows.length, onTime = rows.filter((r) => r.on_time).length;
+  res.json({
+    total, on_time: onTime,
+    on_time_rate: total > 0 ? ((onTime / total) * 100).toFixed(1) : 0,
+    avg_turnaround_hours: avg.h != null ? Number(avg.h).toFixed(1) : null,
+    orders: rows
   });
 }));
 
@@ -357,6 +403,13 @@ router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asyn
 const FORWARD_PAIRS = `(st.from_stage, st.to_stage) IN
   (('order','production'),('production','packing'),
    ('packing','ready_for_delivery'),('ready_for_delivery','delivered'))`;
+
+// Any move that goes BACKWARD a stage (rework / send-back), with the reason captured.
+const BACKWARD_PAIRS = `(st.from_stage, st.to_stage) IN
+  (('production','order'),
+   ('packing','production'),('packing','order'),
+   ('ready_for_delivery','packing'),('ready_for_delivery','production'),('ready_for_delivery','order'),
+   ('delivered','ready_for_delivery'),('delivered','packing'),('delivered','production'))`;
 
 // GET /api/reports/staff — per-person productivity: stage completions, items
 // marked done, and reworks, in the chosen period. Boss/Ops + Production Lead (no customer names).
@@ -711,6 +764,32 @@ router.get('/mistakes', authenticate, authorize(...ADMIN_ROLES), asyncHandler(as
   const onHold = (await query("SELECT COUNT(*)::int AS n FROM orders WHERE on_hold = true")).rows[0].n;
   const waiting = (await query("SELECT COUNT(*)::int AS n FROM orders WHERE waiting_stock = true")).rows[0].n;
 
+  // Send-backs: orders moved BACKWARD a stage (rework / reversal), with who + reason.
+  const sendbackCount = (await query(
+    `SELECT COUNT(*)::int AS n FROM stage_transitions st WHERE ${BACKWARD_PAIRS} ${win('st.created_at')}`, params
+  )).rows[0].n;
+  const sendbackList = (await query(`
+    SELECT st.created_at, st.from_stage, st.to_stage, st.reason,
+      u.name AS user_name, o.invoice_number
+    FROM stage_transitions st
+    LEFT JOIN users u ON u.id = st.transitioned_by
+    LEFT JOIN orders o ON o.id = st.order_id
+    WHERE ${BACKWARD_PAIRS} ${win('st.created_at')}
+    ORDER BY st.created_at DESC LIMIT 12
+  `, params)).rows;
+
+  // Which STKs get sent back the most — from per-line send-backs (split board "↩ To
+  // Production"), logged as action='line_moved'. SKU is stored in new_value going
+  // forward; fall back to parsing it out of details ("<SKU> — <name> → production").
+  const problemItems = (await query(`
+    SELECT COALESCE(NULLIF(new_value, ''), split_part(details, ' — ', 1)) AS sku,
+      MAX(NULLIF(split_part(split_part(details, ' — ', 2), ' → ', 1), '')) AS name,
+      COUNT(*)::int AS sendbacks
+    FROM activity_log
+    WHERE action = 'line_moved' ${win('created_at')}
+    GROUP BY 1 ORDER BY sendbacks DESC, sku ASC LIMIT 12
+  `, params)).rows;
+
   // 8-week amendment trend (the "is it getting better" line).
   const trend = (await query(`
     SELECT date_trunc('week', created_at)::date AS date, COUNT(*)::int AS count
@@ -722,6 +801,7 @@ router.get('/mistakes', authenticate, authorize(...ADMIN_ROLES), asyncHandler(as
   res.json({
     amendments: { count: amendCount, list: amendList },
     late: { count: lateCount, list: lateList },
+    sendbacks: { count: sendbackCount, list: sendbackList, items: problemItems },
     failed_count: failed, cancelled_count: cancelled, on_hold_count: onHold, waiting_stock_count: waiting,
     trend
   });
