@@ -675,8 +675,8 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
     }
   }
 
-  // Managers move freely; stage staff may only advance their own stage forward one step.
-  if (!['super_admin'].includes(req.user.role)) {
+  // Managers (Boss + back-office Admin) move freely; stage staff may only advance their own stage forward one step.
+  if (!['super_admin', 'admin'].includes(req.user.role)) {
     if (order.on_hold) return res.status(403).json({ error: 'Order is on hold' });
     const owners = STAGE_OWNERS[fromStage] || [];
     const forwardOk = owners.includes(req.user.role) && to_stage === FORWARD_STAGE[fromStage];
@@ -923,7 +923,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const ord = (await query('SELECT id, invoice_number, stage, pic_id FROM orders WHERE id = $1', [req.params.id])).rows[0];
 
-  const isManager = ['super_admin'].includes(req.user.role);
+  const isManager = ['super_admin', 'admin'].includes(req.user.role);
   const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
   // Boss + back-office Admin may amend a placed line (correct a wrong STK / qty / unit).
   // Adding or removing whole lines stays locked (POST/DELETE below) — those must match
@@ -938,7 +938,7 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   // Supervisors only. Resets the line's completion flags, then keeps the order's stage
   // in step with its lines.
   if (b.line_move) {
-    if (!['super_admin', 'production_lead'].includes(req.user.role)) {
+    if (!['super_admin', 'admin', 'production_lead'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Only a supervisor can move a line between stages' });
     }
     if (b.line_move !== 'to_production') return res.status(400).json({ error: 'Invalid line move' });
