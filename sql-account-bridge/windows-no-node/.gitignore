@@ -1,0 +1,4 @@
+# Real config holds the webhook secret — never commit it.
+config.ps1
+# Run log.
+sync.log

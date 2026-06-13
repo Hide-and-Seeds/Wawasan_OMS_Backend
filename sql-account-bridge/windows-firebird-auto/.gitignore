@@ -1,0 +1,5 @@
+# Real config holds the webhook secret - never commit it.
+config.ps1
+# Logs and any local DB snapshots.
+*.log
+*.fdb

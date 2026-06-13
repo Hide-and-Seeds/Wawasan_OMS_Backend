@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node --env-file=.env bridge.mjs",
-    "dry-run": "node --env-file=.env bridge.mjs --dry-run"
+    "dry-run": "node --env-file=.env bridge.mjs --dry-run",
+    "discover": "node --env-file=.env discover-firebird.mjs"
   }
 }
