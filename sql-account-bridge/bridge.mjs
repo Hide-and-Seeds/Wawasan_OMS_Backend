@@ -88,6 +88,7 @@ function parseCsv(text) {
 }
 
 function toIsoDate(s) {
+  if (s instanceof Date && !isNaN(s)) return s.toISOString().slice(0, 10); // Firebird returns JS Date
   s = String(s || "").trim();
   let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);                       // YYYY-MM-DD
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
@@ -162,12 +163,51 @@ async function fromCsv() {
   return invoices;
 }
 
+// Read SQL Account's Firebird DB directly. Needs `npm i node-firebird` on the
+// on-prem PC. You supply the SELECT via FB_SQL (SQL Account's table names are
+// cryptic and version-specific — don't guess; copy the real ones from the .FDB).
+// The query must return ONE ROW PER INVOICE LINE, with column aliases that match
+// the same logical fields the CSV path uses (docNo, customer, sku, name, qty …).
+// We turn the result into a [headers, ...rows] table and reuse rowsToInvoices(),
+// so all the alias-matching, grouping and delivery-address logic is shared.
 async function fromFirebird() {
-  // TODO: read SQL Account's Firebird DB directly. `npm i node-firebird`, connect
-  // with { host: FB_HOST, port: 3050, database: FB_DATABASE (.FDB path), user, password },
-  // SELECT new invoices + their lines since the last Doc No, and return the same
-  // shape rowsToInvoices() produces. See README "Sources".
-  throw new Error("SOURCE=firebird not implemented yet — fill in fromFirebird() (see README).");
+  const { default: Firebird } = await import("node-firebird"); // lazy: only when SOURCE=firebird
+  const options = {
+    host: process.env.FB_HOST || "127.0.0.1",
+    port: parseInt(process.env.FB_PORT || "3050", 10),
+    database: process.env.FB_DATABASE,            // full path to the .FDB
+    user: process.env.FB_USER || "SYSDBA",
+    password: process.env.FB_PASSWORD || "masterkey",
+    lowercase_keys: false,
+    encoding: process.env.FB_ENCODING || "UTF8",
+  };
+  if (!options.database) throw new Error("SOURCE=firebird needs FB_DATABASE (full path to the .FDB).");
+  const sql = (process.env.FB_SQL || "").trim();
+  if (!sql) throw new Error("SOURCE=firebird needs FB_SQL — the SELECT returning one row per invoice line.");
+
+  // Optional incremental window: FB_SINCE_DAYS makes ?-style params available as
+  // a single bound value (days back from today) if your FB_SQL uses one '?'.
+  const params = [];
+  if (process.env.FB_SINCE_DAYS) {
+    const d = new Date(Date.now() - parseInt(process.env.FB_SINCE_DAYS, 10) * 86400000);
+    params.push(d.toISOString().slice(0, 10)); // YYYY-MM-DD for a WHERE DOCDATE >= ?
+  }
+
+  const rowObjs = await new Promise((resolve, reject) => {
+    Firebird.attach(options, (err, db) => {
+      if (err) return reject(err);
+      db.query(sql, params, (qErr, result) => {
+        db.detach();
+        if (qErr) return reject(qErr);
+        resolve(result || []);
+      });
+    });
+  });
+
+  if (!rowObjs.length) return [];
+  const headers = Object.keys(rowObjs[0]);
+  const table = [headers, ...rowObjs.map((o) => headers.map((h) => o[h]))];
+  return rowsToInvoices(table);
 }
 
 async function fromSdk() {
