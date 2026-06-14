@@ -23,6 +23,7 @@ function isAllowedOrigin(origin) {
     const { hostname } = new URL(origin);
     if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
     if (hostname.endsWith('.vercel.app')) return true; // production + preview deploys
+    if (hostname === 'wawasancandle.com' || hostname.endsWith('.wawasancandle.com')) return true; // client custom domains (oms., app., ...)
   } catch {
     // malformed Origin header — fall through to deny
   }
