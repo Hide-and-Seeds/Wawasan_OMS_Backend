@@ -17,7 +17,7 @@ $isql = Join-Path $FirebirdDir 'isql.exe'
 if(-not (Test-Path -LiteralPath $isql)){ throw "isql not found at $isql - run Install.ps1 first" }
 
 # 1. snapshot copy (sidesteps the embedded lock; the .FDB is copyable while the app is open)
-$copy = Join-Path $env:TEMP 'wws-acc-copy.fdb'
+$copy = Join-Path $env:TEMP ("wws-acc-copy-$PID.fdb")   # per-process name: never collide with another instance
 Copy-Item -LiteralPath $FdbPath -Destination $copy -Force
 
 # 2. CSV-emitting query (one row per invoice line). The SQL builds quoted, escaped
@@ -47,8 +47,8 @@ WHERE h.CANCELLED=FALSE AND h.DOCDATE IS NOT NULL AND UPPER(h.DOCNO) NOT LIKE 'L
 ORDER BY h.DOCNO, d.SEQ;
 '@
 $q = $q.Replace('__DAYS__', [string][int]$DaysBack)
-$qFile  = Join-Path $env:TEMP 'wws-q.sql'
-$outFile= Join-Path $env:TEMP 'wws-out.txt'
+$qFile  = Join-Path $env:TEMP ("wws-q-$PID.sql")
+$outFile= Join-Path $env:TEMP ("wws-out-$PID.txt")
 Set-Content -LiteralPath $qFile -Value $q -Encoding ASCII
 
 # 3. read the copy in embedded mode (no server)

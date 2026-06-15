@@ -7,6 +7,15 @@ $ErrorActionPreference='Continue'
 function Write-Log($m){ $l=('{0}  {1}' -f (Get-Date -Format 's'),$m); if($LogFile){ try{ Add-Content -LiteralPath $LogFile -Value $l }catch{} } }
 
 if(-not (Test-Path -LiteralPath $FdbPath)){ Write-Log "Watch: FDB not found '$FdbPath' - run Install.ps1"; exit 1 }
+
+# Single-instance: if another Watch.ps1 is already running, exit. Multiple watchers
+# would race the shared snapshot/temp files and corrupt every sync.
+try {
+  $others = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -EA SilentlyContinue |
+            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'Watch\.ps1' }
+  if($others){ Write-Log ("another watcher already running (PID {0}) - this instance exits" -f ($others.ProcessId -join ',')); exit 0 }
+} catch { }
+
 $dir  = Split-Path -LiteralPath $FdbPath
 $name = Split-Path -LiteralPath $FdbPath -Leaf
 
