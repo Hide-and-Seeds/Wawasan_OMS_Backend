@@ -13,6 +13,9 @@ $FdbPath       = ""
 # Only send invoices dated within this many days (keeps each send small; the cloud de-dups).
 $DaysBack      = 30
 
+# Invoices per POST batch (prevents huge first-time payloads -> Vercel 413 on backfills).
+$BatchInvoices = 25
+
 # Where Install.ps1 puts the bundled Firebird tool (no admin).
 $FirebirdDir   = "$env:LOCALAPPDATA\WawasanOMS\firebird"
 

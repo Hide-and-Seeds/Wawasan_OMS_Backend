@@ -57,21 +57,42 @@ $code=$LASTEXITCODE
 Remove-Item -LiteralPath $copy -Force -EA SilentlyContinue
 if($code -ne 0){ $err=''; if(Test-Path $outFile){ $err=(Get-Content -LiteralPath $outFile -Raw) }; throw "isql failed (exit $code). $err" }
 
-# 4. assemble CSV: our header + the emitted data lines (each starts with a double-quote)
+# 4. collect emitted data lines (each starts with a double-quote)
 $header='DocNo,DocDate,CompanyName,Phone,Terms,ItemCode,Description,Qty,UOM,DeliveryAddress1,DeliveryAddress2,DeliveryAddress3,DeliveryAddress4,DeliveryAddress5,DeliveryAddress6,DeliveryAddress7'
 $rows = @(Get-Content -LiteralPath $outFile | Where-Object { $_ -match '^"' })
 if($rows.Count -eq 0){ Write-Log 'no invoices in window - nothing to send'; return }
-$csv = $header + "`r`n" + ($rows -join "`r`n")
 
-# 5. POST. The cloud parses + de-dups, so re-sending the same window is harmless.
-$payload=@{ csv=$csv }
-if($DryRun){ $payload.dry_run=$true }
-$body=$payload|ConvertTo-Json -Compress
-try{
-  $r=Invoke-RestMethod -Uri $WebhookUrl -Method Post -ContentType 'application/json' -Headers @{ 'x-webhook-secret'=$WebhookSecret } -Body $body
-  if($DryRun){ Write-Log ("DRY-RUN ok: lines={0} invoices={1} new={2} (nothing created)" -f $rows.Count,$r.total,$r.new_count) }
-  else       { Write-Log ("sent: lines={0} invoices={1} created={2} duplicate={3}" -f $rows.Count,$r.total,$r.created,$r.duplicate) }
-}catch{
-  $d=$_.ErrorDetails.Message; if(-not $d){ $d=$_.Exception.Message }
-  Write-Log ("ERROR posting: $d"); throw
+# 5. split into batches of N invoices so no single POST is too large (Vercel 413 on
+#    big first-time backfills). Rows are ORDER BY DOCNO so each invoice's lines are
+#    contiguous - we only cut on an invoice boundary. The cloud de-dups -> safe + re-runnable.
+$batchInv = if($BatchInvoices){ [int]$BatchInvoices } else { 25 }
+$batches=@(); $cur=@(); $curDoc=$null; $invInBatch=0
+foreach($row in $rows){
+  $doc = if($row -match '^"((?:[^"]|"")*)"'){ $Matches[1] } else { $row }
+  if($doc -ne $curDoc){
+    if($invInBatch -ge $batchInv){ $batches += ,$cur; $cur=@(); $invInBatch=0 }
+    $curDoc=$doc; $invInBatch++
+  }
+  $cur += $row
 }
+if($cur.Count){ $batches += ,$cur }
+
+# 6. POST each batch. The cloud parses + de-dups, so re-sending a window is harmless.
+$hdrs=@{ 'x-webhook-secret'=$WebhookSecret }
+$bN=0; $tInv=0; $tCreated=0; $tDup=0; $tNew=0
+foreach($b in $batches){
+  $bN++
+  $payload=@{ csv = ($header + "`r`n" + ($b -join "`r`n")) }
+  if($DryRun){ $payload.dry_run=$true }
+  $body=$payload | ConvertTo-Json -Compress
+  try{
+    $r=Invoke-RestMethod -Uri $WebhookUrl -Method Post -ContentType 'application/json' -Headers $hdrs -Body $body
+    $tInv += [int]$r.total
+    if($DryRun){ $tNew += [int]$r.new_count } else { $tCreated += [int]$r.created; $tDup += [int]$r.duplicate }
+  }catch{
+    $d=$_.ErrorDetails.Message; if(-not $d){ $d=$_.Exception.Message }
+    Write-Log ("ERROR posting batch $bN/$($batches.Count): $d"); throw
+  }
+}
+if($DryRun){ Write-Log ("DRY-RUN ok: {0} batch(es), invoices={1} new={2} (nothing created)" -f $batches.Count,$tInv,$tNew) }
+else       { Write-Log ("sent: {0} batch(es), invoices={1} created={2} duplicate={3}" -f $batches.Count,$tInv,$tCreated,$tDup) }

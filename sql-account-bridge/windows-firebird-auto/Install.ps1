@@ -34,7 +34,7 @@ Copy-Item -LiteralPath $FdbPath -Destination $tmp -Force
 $bytes = [System.IO.File]::ReadAllBytes($tmp)
 $ods = [BitConverter]::ToUInt16($bytes,18) -band 0x7FFF
 Remove-Item $tmp -Force -EA SilentlyContinue
-$fbTag = if($ods -ge 13){ 'v5.0.4' } else { 'v4.0.5' }
+$fbTag = if($ods -ge 13){ 'v5.0.4' } else { 'v4.0.6' }   # FB5 opens ODS 13.x; FB4 opens ODS 12 + 13.0 (not 13.1). No single build covers 12 AND 13.1.
 Say "database ODS = $ods -> Firebird $fbTag"
 
 # 3. download + extract Firebird (no admin) unless already there
@@ -43,8 +43,9 @@ if(Test-Path $isql){ Say "Firebird tool already present." }
 else {
   Say "downloading Firebird $fbTag ..."
   $rel = Invoke-RestMethod "https://api.github.com/repos/FirebirdSQL/firebird/releases/tags/$fbTag" -Headers @{ 'User-Agent'='wws' }
-  $asset = $rel.assets | Where-Object { $_.name -match 'windows-x64\.zip$' -and $_.name -notmatch 'Debug|pdb|withDebug' } | Select-Object -First 1
-  if(-not $asset){ throw "No Firebird $fbTag windows-x64 zip found. Install Firebird manually and set `$FirebirdDir." }
+  # FB5 asset is '...-windows-x64.zip'; FB4 asset is '...-x64.zip'. Match both, exclude 32-bit + debug.
+  $asset = $rel.assets | Where-Object { $_.name -match 'x64\.zip$' -and $_.name -notmatch 'pdb|Win32' } | Select-Object -First 1
+  if(-not $asset){ throw "No Firebird $fbTag x64 zip found. Install Firebird manually and set `$FirebirdDir." }
   $zip = Join-Path $env:TEMP $asset.name
   Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
   New-Item -ItemType Directory -Force -Path $FirebirdDir | Out-Null
