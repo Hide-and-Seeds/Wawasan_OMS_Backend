@@ -496,13 +496,32 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 async function importParsedInvoices(invoices, createdBy, ipAddress) {
   const leadDays = parseInt(process.env.SQL_ACCOUNT_DEFAULT_LEAD_DAYS) || 7;
   const numbers = invoices.map((i) => i.invoice_number);
-  const taken = new Set(
-    (await query('SELECT invoice_number FROM orders WHERE invoice_number = ANY($1::text[])', [numbers])).rows.map((r) => r.invoice_number)
+  const existing = new Map(
+    (await query('SELECT invoice_number, id, delivery_address, customer_contact FROM orders WHERE invoice_number = ANY($1::text[])', [numbers]))
+      .rows.map((r) => [r.invoice_number, r])
   );
+  const taken = new Set(existing.keys());
+  const blank = (v) => v === null || v === undefined || String(v).trim() === '';
   const results = [];
-  let created = 0, duplicate = 0, failed = 0;
+  let created = 0, duplicate = 0, failed = 0, backfilled = 0;
   for (const inv of invoices) {
-    if (taken.has(inv.invoice_number)) { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); continue; }
+    if (taken.has(inv.invoice_number)) {
+      // Existing order: never overwrite, but fill a MISSING delivery address / contact if
+      // this re-sync now carries one (e.g. the bridge started falling back to the billing
+      // address, or SQL Account gained one). Fill-blanks-only keeps re-runs safe + idempotent.
+      const cur = existing.get(inv.invoice_number);
+      const fills = [];
+      if (blank(cur.delivery_address) && !blank(inv.delivery_address)) fills.push(['delivery_address', inv.delivery_address]);
+      if (blank(cur.customer_contact) && !blank(inv.customer_contact)) fills.push(['customer_contact', inv.customer_contact]);
+      if (fills.length) {
+        try {
+          const sets = fills.map((f, i) => `${f[0]} = $${i + 2}`).join(', ');
+          await query(`UPDATE orders SET ${sets} WHERE id = $1`, [cur.id, ...fills.map((f) => f[1])]);
+          backfilled++; results.push({ invoice_number: inv.invoice_number, status: 'backfilled' });
+        } catch (e) { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); }
+      } else { duplicate++; results.push({ invoice_number: inv.invoice_number, status: 'duplicate' }); }
+      continue;
+    }
     const orderId = uuidv4();
     const composedNotes = [inv.po_ref ? `PO ${inv.po_ref}` : null, inv.payment_terms || null, 'Imported from SQL Account CSV'].filter(Boolean).join(' · ');
     try {
@@ -539,7 +558,7 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
       else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
     }
   }
-  return { created, duplicate, failed, results };
+  return { created, duplicate, failed, backfilled, results };
 }
 
 // POST /api/orders/import — bulk-import invoices from a SQL Account CSV export.
