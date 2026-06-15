@@ -59,7 +59,7 @@ function cronRoute(path, handler) { router.get(path, cronOrAdmin, handler); rout
 const tpl = {
   received: (o) => `Hi ${o.customer_name}, thank you! Your ${BRAND} order ${o.invoice_number} is confirmed and now in production.${o.required_delivery_date ? ` Expected delivery: ${o.required_delivery_date}.` : ''} We'll keep you posted as it progresses.`,
   ready: (o) => `Hi ${o.customer_name}, your ${BRAND} order ${o.invoice_number} is packed and quality-checked — we're arranging delivery now.`,
-  out_for_delivery: (o) => `Hi ${o.customer_name}, good news — your ${BRAND} order ${o.invoice_number} is on the way${o.courier ? ' via ' + o.courier : ''}.${o.tracking_no ? ' Tracking: ' + o.tracking_no + '.' : ''}`,
+  out_for_delivery: (o) => `Hi ${o.customer_name}, good news — your ${BRAND} order ${o.invoice_number} is on the way${o.driver ? ' with ' + o.driver : ''}.`,
   delivered: (o) => `Hi ${o.customer_name}, your ${BRAND} order ${o.invoice_number} has been delivered. Thank you for choosing us!`,
   delayed: (o) => `Hi ${o.customer_name}, a quick update on your ${BRAND} order ${o.invoice_number}: it's briefly on hold${o.waiting_stock ? ' (awaiting materials)' : ''} so it may take a little longer. We'll message you the moment it moves — thanks for your patience.`,
 };
@@ -92,7 +92,7 @@ async function enqueueCustomerMessages() {
   // "out for delivery" — a delivery is scheduled / in transit.
   for (const o of (await query(
     `SELECT o.id, o.invoice_number, o.customer_name, o.customer_contact,
-            COALESCE(dl.name, u.name) AS courier, d.tracking_no
+            COALESCE(dl.name, u.name) AS driver
      FROM deliveries d JOIN orders o ON d.order_id = o.id
      LEFT JOIN deliverers dl ON d.deliverer_id = dl.id
      LEFT JOIN users u ON d.delivery_man_id = u.id

@@ -231,14 +231,12 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     WHERE d.status = 'delivered' AND d.delivered_at IS NOT NULL ${dateFilter}
   `, params)).rows[0];
 
-  // One row per carrier — in-house drivers AND each marketplace courier (SPX / LEX) —
-  // each with a (kind,key) the carrier drill-down filters on.
+  // One row per in-house driver, each with a (kind,key) the drill-down filters on.
   const byCarrier = (await query(`
     SELECT
-      CASE WHEN COALESCE(d.channel,'in_house')='in_house' THEN 'driver' ELSE 'courier' END AS kind,
-      CASE WHEN COALESCE(d.channel,'in_house')='in_house' THEN COALESCE(dl.id::text, u.id::text, 'none') ELSE d.channel END AS key,
-      CASE WHEN COALESCE(d.channel,'in_house')='in_house' THEN COALESCE(dl.name, u.name, 'Unassigned')
-           WHEN d.channel='shopee' THEN 'Shopee (SPX)' ELSE 'Lazada (LEX)' END AS name,
+      'driver' AS kind,
+      COALESCE(dl.id::text, u.id::text, 'none') AS key,
+      COALESCE(dl.name, u.name, 'Unassigned') AS name,
       COUNT(*)::int AS total,
       SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
     FROM deliveries d
@@ -247,17 +245,6 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     JOIN orders o ON d.order_id = o.id
     WHERE d.status = 'delivered' ${dateFilter}
     GROUP BY 1, 2, 3 ORDER BY total DESC
-  `, params)).rows;
-
-  // How it shipped: own van vs marketplace courier hand-off (Shopee SPX / Lazada LEX).
-  const byChannel = (await query(`
-    SELECT COALESCE(d.channel, 'in_house') AS channel,
-      COUNT(*)::int AS total,
-      SUM(CASE WHEN d.delivered_at::date <= o.required_delivery_date THEN 1 ELSE 0 END)::int AS on_time
-    FROM deliveries d
-    JOIN orders o ON d.order_id = o.id
-    WHERE d.status = 'delivered' ${dateFilter}
-    GROUP BY COALESCE(d.channel, 'in_house') ORDER BY total DESC
   `, params)).rows;
 
   // Live snapshot, not period-bound: deliveries still out, and ones that failed.
@@ -280,13 +267,12 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
     pending_count: pending.count,
     failed_count: failed.count,
     by_carrier: byCarrier,
-    by_channel: byChannel,
     daily_trend: dailyTrend
   });
 }));
 
-// GET /api/reports/delivery/carrier — one carrier's deliveries detail (the click-through
-// from the By-carrier table): kind=driver|courier, key=deliverer/user id OR channel.
+// GET /api/reports/delivery/carrier — one driver's deliveries detail (the click-through
+// from the By-carrier table): key = deliverer/user id.
 router.get('/delivery/carrier', authenticate, authorize(...DELIVERY_REPORT_ROLES), asyncHandler(async (req, res) => {
   const { kind, key, period = 'weekly', from, to } = req.query;
   if (!key) return res.status(400).json({ error: 'key required' });
@@ -298,13 +284,11 @@ router.get('/delivery/carrier', authenticate, authorize(...DELIVERY_REPORT_ROLES
   else if (period === 'weekly') dateFilter = "AND date_trunc('week', d.delivered_at) = date_trunc('week', now())";
   else if (period === 'monthly') dateFilter = "AND date_trunc('month', d.delivered_at) = date_trunc('month', now())";
 
-  const carrierFilter = kind === 'courier'
-    ? `AND d.channel = $${params.push(key)}`
-    : `AND COALESCE(d.channel,'in_house') = 'in_house' AND COALESCE(d.deliverer_id::text, d.delivery_man_id::text, 'none') = $${params.push(key)}`;
+  const carrierFilter = `AND COALESCE(d.deliverer_id::text, d.delivery_man_id::text, 'none') = $${params.push(key)}`;
 
   const rows = (await query(`
     SELECT o.invoice_number, o.customer_name, o.required_delivery_date,
-      d.delivered_at, d.tracking_no,
+      d.delivered_at,
       (d.delivered_at::date <= o.required_delivery_date) AS on_time
     FROM deliveries d JOIN orders o ON o.id = d.order_id
     WHERE d.status = 'delivered' ${dateFilter} ${carrierFilter}
@@ -350,7 +334,7 @@ router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(asyn
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND status = 'in_progress') AS in_progress_count,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND pack_made) AS packed_count,
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND pack_status = 'in_progress') AS pack_in_progress_count,
-      (SELECT COALESCE(dl.name, du.name, CASE d.channel WHEN 'shopee' THEN 'Shopee (SPX)' WHEN 'lazada' THEN 'Lazada (LEX)' END)
+      (SELECT COALESCE(dl.name, du.name)
        FROM deliveries d LEFT JOIN deliverers dl ON dl.id = d.deliverer_id LEFT JOIN users du ON du.id = d.delivery_man_id
        WHERE d.order_id = o.id AND d.status <> 'failed' ORDER BY d.created_at DESC LIMIT 1) AS carrier_name
     FROM orders o

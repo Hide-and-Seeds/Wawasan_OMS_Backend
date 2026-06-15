@@ -28,9 +28,8 @@ async function ensureDeliverySchema() {
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliverer_id uuid REFERENCES deliverers(id)');
   // When a Delivery Order was last printed — lets a mass print skip already-printed notes.
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS do_printed_at timestamptz');
-  // 3rd-party courier hand-off: channel = in_house (own van, default) | shopee | lazada.
-  // For a marketplace channel the parcel goes to the platform's courier (SPX / LEX), so
-  // we store their tracking/AWB number and when it was handed over instead of a driver.
+  // Legacy columns from the removed 3rd-party courier hand-off - kept inert (always
+  // in_house / null) so old rows still read; delivery is IN-HOUSE ONLY now.
   await query("ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'in_house'");
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS tracking_no text');
   await query('ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS handed_over_at timestamptz');
@@ -109,23 +108,14 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   await ensureDeliverySchema();
 
-  const { order_id, deliverer_id, scheduled_date, address, notes, tracking_no } = req.body;
+  const { order_id, deliverer_id, scheduled_date, address, notes } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
-
-  // Fulfilment channel: own van (default) or hand to a marketplace courier.
-  const channel = ['in_house', 'shopee', 'lazada'].includes(req.body.channel) ? req.body.channel : 'in_house';
-  const isCourier = channel !== 'in_house';
-  // A marketplace hand-off needs the courier's tracking / AWB number to be traceable.
-  if (isCourier && !(tracking_no && tracking_no.trim())) {
-    return res.status(400).json({ error: 'Tracking / AWB number is required for a courier hand-off' });
-  }
 
   const order = (await query("SELECT id, delivery_address FROM orders WHERE id = $1 AND stage = 'ready_for_delivery'", [order_id])).rows[0];
   if (!order) return res.status(400).json({ error: 'Order not found or not ready for delivery' });
 
-  // A deliverer (if chosen) must be a real, active one. Deliverers don't log in.
-  // Marketplace hand-offs carry no in-house driver — their courier delivers it.
-  if (deliverer_id && !isCourier) {
+  // A deliverer (if chosen) must be a real, active in-house driver. Deliverers don't log in.
+  if (deliverer_id) {
     const dl = (await query('SELECT id, is_active FROM deliverers WHERE id = $1', [deliverer_id])).rows[0];
     if (!dl || !dl.is_active) return res.status(400).json({ error: 'Deliverer must be active' });
   }
@@ -133,10 +123,10 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   const id = uuidv4();
   await withTransaction(async (q) => {
     await q(`
-      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes, channel, tracking_no)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    `, [id, order_id, isCourier ? null : (deliverer_id || null), scheduled_date || null,
-        address || order.delivery_address || null, notes || null, channel, isCourier ? tracking_no.trim() : null]);
+      INSERT INTO deliveries (id, order_id, deliverer_id, scheduled_date, address, notes)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [id, order_id, deliverer_id || null, scheduled_date || null,
+        address || order.delivery_address || null, notes || null]);
 
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_scheduled', $4)`,
@@ -173,11 +163,8 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
   // Proof gate: a completed delivery needs a POD photo on the order, unless the
   // caller explicitly delivers without one (no_proof) — then Boss/Ops are notified.
   await ensureDeliverySchema();
-  // A marketplace hand-off (Shopee/Lazada) is "delivered" the moment it's given to their
-  // courier — the platform owns tracking + proof, so the in-house POD photo isn't required.
-  const isCourier = delivery.channel && delivery.channel !== 'in_house';
   const hasPod = !!(await query("SELECT 1 FROM order_attachments WHERE order_id = $1 AND kind = 'pod' LIMIT 1", [delivery.order_id])).rows[0];
-  if (!isCourier && !hasPod && !req.body.no_proof) return res.status(428).json({ error: 'no_proof' });
+  if (!hasPod && !req.body.no_proof) return res.status(428).json({ error: 'no_proof' });
 
   let signatureFile = null;
   if (req.file) {
@@ -194,9 +181,8 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
 
     await q(`
       UPDATE deliveries SET status = 'delivered', delivered_at = now(),
-        handed_over_at = CASE WHEN $3 THEN now() ELSE handed_over_at END,
         signature_file = $1, updated_at = now() WHERE id = $2
-    `, [signatureFile, delivery.id, isCourier]);
+    `, [signatureFile, delivery.id]);
 
     // Move order to delivered
     await q("UPDATE orders SET stage = 'delivered', updated_at = now() WHERE id = $1", [delivery.order_id]);
@@ -205,14 +191,11 @@ router.post('/:id/deliver', authenticate, upload.single('signature'), asyncHandl
       [uuidv4(), delivery.order_id, 'ready_for_delivery', 'delivered', req.user.id]);
 
     // Audit log (was previously missing on delivery completion).
-    const detail = isCourier
-      ? `Handed to ${delivery.channel === 'shopee' ? 'Shopee (SPX)' : 'Lazada (LEX)'}${delivery.tracking_no ? ' · ' + delivery.tracking_no : ''}`
-      : (hasPod ? 'Marked delivered' : 'Marked delivered — no proof');
+    const detail = hasPod ? 'Marked delivered' : 'Marked delivered — no proof';
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details)
              VALUES ($1, $2, $3, 'delivery_completed', $4)`,
       [uuidv4(), delivery.order_id, req.user.id, detail]);
-    // Courier hand-offs always have "proof" (the platform's tracking), so never flag no-proof.
-    await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'delivered', !isCourier && !hasPod);
+    await notifyDelivered(q, delivery.order_id, req.user.id, req.user.name, 'delivered', !hasPod);
     return { already: false };
   });
 
