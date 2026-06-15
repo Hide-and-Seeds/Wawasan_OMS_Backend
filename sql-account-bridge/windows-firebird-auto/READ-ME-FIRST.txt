@@ -1,0 +1,32 @@
+WAWASAN OMS - SQL Account auto-sync   (one-time setup, ~2 minutes)
+===================================================================
+
+WHAT IT DOES
+  Every invoice you key into SQL Account shows up on the OMS board
+  (https://oms.wawasancandle.com) by itself, within a few seconds.
+  No exporting, no clicking, no cost.
+
+SETUP  -- do this ON THE PC THAT RUNS SQL ACCOUNT
+  1. Make sure SQL Account is installed on THIS PC.
+  2. Make sure THIS PC has internet.
+  3. Double-click   RUN-ME.bat
+  4. Wait until it prints  DONE.  Close the window. Finished.
+
+  It installs itself, starts immediately, and restarts automatically
+  every time you log in. No administrator password needed.
+
+TO TURN IT OFF (anytime)
+  Double-click   TURN-OFF.bat
+
+IF IT CANNOT FIND YOUR DATABASE
+  It auto-looks under C:\eStream. If your SQL Account data is elsewhere,
+  open  config.ps1  in Notepad and set the line:
+      $FdbPath = "C:\path\to\YOURCOMPANY.FDB"
+  then double-click RUN-ME.bat again.
+
+KEEP THIS FOLDER PRIVATE
+  config.ps1 holds the connection secret for your OMS. Don't post it
+  publicly. Sending it to your own staff PC is fine.
+
+QUESTIONS
+  Contact your OMS administrator.
