@@ -503,8 +503,11 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
   const taken = new Set(existing.keys());
   const blank = (v) => v === null || v === undefined || String(v).trim() === '';
   const results = [];
-  let created = 0, duplicate = 0, failed = 0, backfilled = 0;
+  let created = 0, duplicate = 0, failed = 0, backfilled = 0, skipped_marketplace = 0;
   for (const inv of invoices) {
+    // Marketplace invoices (Lazada/Shopee/TikTok) use a DOCNO prefixed 'L' and are
+    // handled by a separate commerce team - never import them into the OMS.
+    if (/^L/i.test(String(inv.invoice_number || ''))) { skipped_marketplace++; results.push({ invoice_number: inv.invoice_number, status: 'skipped_marketplace' }); continue; }
     if (taken.has(inv.invoice_number)) {
       // Existing order: never overwrite, but fill a MISSING delivery address / contact if
       // this re-sync now carries one (e.g. the bridge started falling back to the billing
@@ -558,7 +561,7 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
       else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
     }
   }
-  return { created, duplicate, failed, backfilled, results };
+  return { created, duplicate, failed, backfilled, skipped_marketplace, results };
 }
 
 // POST /api/orders/import — bulk-import invoices from a SQL Account CSV export.
@@ -1188,6 +1191,11 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
 
   if (!invoice_number || !customer_name) {
     return res.status(400).json({ error: 'invoice_number and customer_name are required' });
+  }
+  // Marketplace (Lazada/Shopee/TikTok) invoices use a DOCNO prefixed 'L' and are handled
+  // by a separate commerce team - never import them via SQL Account sync.
+  if (/^L/i.test(String(invoice_number))) {
+    return res.status(200).json({ skipped: 'marketplace', invoice_number });
   }
 
   // Sanitise rather than reject: an automated trigger must never drop an invoice
