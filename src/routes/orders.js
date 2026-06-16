@@ -1171,12 +1171,27 @@ router.delete('/:id/attachments/:attId', authenticate, canMoveOrders, asyncHandl
 // lead time that Ops can adjust on the board.
 const SQL_ACCOUNT_LEAD_DAYS = parseInt(process.env.SQL_ACCOUNT_DEFAULT_LEAD_DAYS) || 7;
 
+// Boss kill-switch for automated order intake (System Settings → Order tracking).
+// Default ON; only the explicit string 'false' pauses it. Lets the Boss stop new
+// invoices being recorded (security / maintenance) without touching existing orders.
+async function orderIntakeEnabled() {
+  const r = await query("SELECT value FROM system_settings WHERE key = 'order_intake_enabled'");
+  return !(r.rows[0] && String(r.rows[0].value).toLowerCase() === 'false');
+}
+
 router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   // Validate webhook secret. Fail closed: if the secret isn't configured we must
   // reject, otherwise (undefined === undefined) would let unauthenticated calls through.
   const secret = req.headers['x-webhook-secret'];
   if (!process.env.SQL_ACCOUNT_WEBHOOK_SECRET || secret !== process.env.SQL_ACCOUNT_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+
+  // Boss may pause automated intake (System Settings → Order tracking). Skip with
+  // 200 so the on-prem relay does not treat it as an error and retry-storm; nothing
+  // is recorded while paused.
+  if (!(await orderIntakeEnabled())) {
+    return res.status(200).json({ skipped: 'intake_disabled', message: 'Order tracking is paused by the administrator.' });
   }
 
   await ensureImportance();
@@ -1265,6 +1280,9 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
   const secret = req.headers['x-webhook-secret'];
   if (!process.env.SQL_ACCOUNT_WEBHOOK_SECRET || secret !== process.env.SQL_ACCOUNT_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+  if (!(await orderIntakeEnabled())) {
+    return res.status(200).json({ skipped: 'intake_disabled', message: 'Order tracking is paused by the administrator.' });
   }
   await ensureImportance();
   await ensureOrderFlags();

@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { query } = require('../utils/db');
+const { query, withTransaction } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
@@ -68,6 +68,29 @@ router.post('/holidays/bulk', authenticate, authorize('super_admin', 'admin'), a
     if (r.rowCount > 0) inserted++; else skipped++;
   }
   res.json({ inserted, skipped });
+}));
+
+// POST /api/settings/clear-data — Boss-only hard reset of the order board + its full
+// history. Deliberately destructive (the one sanctioned exception to the no-hard-delete
+// policy), so it is super_admin-only and requires { confirm: 'CLEAR' }. Wipes orders +
+// every order-linked table + the activity/audit trail; KEEPS users, settings, holidays,
+// drivers and remarks. The act itself is re-logged after, inside one transaction.
+router.post('/clear-data', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+  if (!req.body || req.body.confirm !== 'CLEAR') {
+    return res.status(400).json({ error: "Confirmation required — send { confirm: 'CLEAR' }." });
+  }
+  const counts = {};
+  await withTransaction(async (q) => {
+    // children first, orders last (FK-safe)
+    const tables = ['order_items', 'stage_transitions', 'notifications', 'message_queue',
+      'deliveries', 'order_attachments', 'activity_log', 'activity_log_archive', 'orders'];
+    for (const t of tables) counts[t] = (await q(`DELETE FROM ${t}`)).rowCount;
+    // Re-log the clear itself so the audit trail records who reset the board.
+    await q(`INSERT INTO activity_log (id, order_id, user_id, action, details, old_value, new_value, ip_address)
+             VALUES ($1, NULL, $2, 'data_cleared', $3, NULL, NULL, $4)`,
+      [uuidv4(), req.user.id, `Cleared order board + history (${counts.orders} orders)`, req.ip || null]);
+  });
+  res.json({ message: 'Order board and history cleared.', counts });
 }));
 
 module.exports = router;
