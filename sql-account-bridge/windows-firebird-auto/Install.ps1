@@ -18,12 +18,21 @@ if(-not $WebhookSecret -or $WebhookSecret -eq 'PASTE_THE_WEBHOOK_SECRET_HERE'){ 
 $base = Split-Path -Parent $LogFile
 New-Item -ItemType Directory -Force -Path $base | Out-Null
 
-# 1. locate the .FDB
+# 1. locate the .FDB. The live company DB is the one SQL Account writes continuously,
+#    so it has the NEWEST LastWriteTime. Do NOT pick by size: SQL Account keeps several
+#    dated company copies that tie on size, so "largest" can grab a stale copy. With
+#    more than one candidate we list them and warn - set $FdbPath to be certain.
 if(-not $FdbPath){
-  Say "auto-detecting .FDB under C:\eStream ..."
-  $f = Get-ChildItem 'C:\eStream' -Recurse -Filter *.fdb -File -EA SilentlyContinue | Sort-Object Length -Descending | Select-Object -First 1
-  if(-not $f){ throw "No .FDB found under C:\eStream - set `$FdbPath in config.ps1." }
-  $FdbPath = $f.FullName
+  Say "auto-detecting .FDB under C:\eStream (newest-updated = the live company) ..."
+  $cands = @(Get-ChildItem 'C:\eStream' -Recurse -Filter *.fdb -File -EA SilentlyContinue |
+             Where-Object { $_.Length -gt 5MB } | Sort-Object LastWriteTime -Descending)
+  if(-not $cands){ throw "No .FDB found under C:\eStream - set `$FdbPath in config.ps1." }
+  $FdbPath = $cands[0].FullName
+  if($cands.Count -gt 1){
+    Say ("{0} databases found - picking the most-recently-updated (->):" -f $cands.Count)
+    $cands | ForEach-Object { Say ("   {0} {1}  {2}MB  {3}" -f $(if($_.FullName -eq $FdbPath){'->'}else{'  '}), $_.LastWriteTime, [math]::Round($_.Length/1MB), $_.FullName) }
+    Say "If that is the wrong company, set `$FdbPath in config.ps1 and re-run RUN-ME.bat."
+  }
 }
 if(-not (Test-Path -LiteralPath $FdbPath)){ throw "FDB not found: $FdbPath" }
 Say "database: $FdbPath"

@@ -19,8 +19,11 @@ $BatchInvoices = 25
 # Where Install.ps1 puts the bundled Firebird tool (no admin).
 $FirebirdDir   = "$env:LOCALAPPDATA\WawasanOMS\firebird"
 
-# Responsiveness: after the DB changes, wait this many seconds for writes to settle,
-# then send. A safety re-check also runs every N minutes even with no change.
+# Responsiveness: check the DB file for changes every PollSeconds; after a change,
+# wait DebounceSeconds for writes to settle, then send. A safety re-check also runs
+# every SafetyMinutes even with no detected change. (Firebird saves are detected by
+# polling the file timestamp - FileSystemWatcher does not fire on its memory-mapped writes.)
+$PollSeconds     = 5
 $DebounceSeconds = 4
 $SafetyMinutes   = 10
 
