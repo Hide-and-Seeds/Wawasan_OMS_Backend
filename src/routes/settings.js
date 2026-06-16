@@ -70,27 +70,35 @@ router.post('/holidays/bulk', authenticate, authorize('super_admin', 'admin'), a
   res.json({ inserted, skipped });
 }));
 
-// POST /api/settings/clear-data — Boss-only hard reset of the order board + its full
-// history. Deliberately destructive (the one sanctioned exception to the no-hard-delete
-// policy), so it is super_admin-only and requires { confirm: 'CLEAR' }. Wipes orders +
-// every order-linked table + the activity/audit trail; KEEPS users, settings, holidays,
-// drivers and remarks. The act itself is re-logged after, inside one transaction.
+// POST /api/settings/clear-data — Boss-only reset of the order board + its history,
+// for a fresh start (new period / after testing). super_admin-only, requires
+// { confirm: 'CLEAR' }. REVERSIBLE: every table is first snapshot to a single rolling
+// recovery copy (<table>__cleared_backup, overwriting the previous one) so a reset can
+// be undone and the audit trail is preserved, not destroyed. Clears orders + every
+// order-linked table + the activity log; KEEPS users, settings, holidays, drivers and
+// remarks. Invoices + financial records live in SQL Account and are never touched here.
+const CLEARABLE_TABLES = ['order_items', 'stage_transitions', 'notifications', 'message_queue',
+  'deliveries', 'order_attachments', 'activity_log', 'activity_log_archive', 'orders'];
 router.post('/clear-data', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
   if (!req.body || req.body.confirm !== 'CLEAR') {
     return res.status(400).json({ error: "Confirmation required — send { confirm: 'CLEAR' }." });
   }
   const counts = {};
   await withTransaction(async (q) => {
-    // children first, orders last (FK-safe)
-    const tables = ['order_items', 'stage_transitions', 'notifications', 'message_queue',
-      'deliveries', 'order_attachments', 'activity_log', 'activity_log_archive', 'orders'];
-    for (const t of tables) counts[t] = (await q(`DELETE FROM ${t}`)).rowCount;
-    // Re-log the clear itself so the audit trail records who reset the board.
+    // 1. Snapshot to a rolling recovery copy first (so the reset is reversible).
+    for (const t of CLEARABLE_TABLES) {
+      await q(`DROP TABLE IF EXISTS ${t}__cleared_backup`);
+      await q(`CREATE TABLE ${t}__cleared_backup AS TABLE ${t}`);
+      counts[t] = (await q(`SELECT count(*)::int AS c FROM ${t}__cleared_backup`)).rows[0].c;
+    }
+    // 2. Clear the live tables (children first, orders last — FK-safe).
+    for (const t of CLEARABLE_TABLES) await q(`DELETE FROM ${t}`);
+    // 3. Re-log the reset so the fresh audit trail records who did it + when.
     await q(`INSERT INTO activity_log (id, order_id, user_id, action, details, old_value, new_value, ip_address)
              VALUES ($1, NULL, $2, 'data_cleared', $3, NULL, NULL, $4)`,
-      [uuidv4(), req.user.id, `Cleared order board + history (${counts.orders} orders)`, req.ip || null]);
+      [uuidv4(), req.user.id, `Reset order board (${counts.orders} orders saved to recovery copy)`, req.ip || null]);
   });
-  res.json({ message: 'Order board and history cleared.', counts });
+  res.json({ message: 'Order board reset. A recovery copy was saved.', counts, recoverable: true });
 }));
 
 module.exports = router;
