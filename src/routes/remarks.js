@@ -6,11 +6,12 @@ const { query, withTransaction } = require('../utils/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 
-// The lead, owners and the back-office Admin may READ the weekly remarks; only the
-// lead and owners may WRITE them.
+// The lead, owners and the back-office Admin may READ the weekly remarks.
 const READ_ROLES = ['super_admin', 'production_lead', 'admin'];
-// Only the Production Head writes the weekly remark; the Boss writes the monthly summary.
-const WRITE_ROLES = ['production_lead'];
+// The Production Head (Reenee, production_lead) and the Admin (Misha) co-own the weekly
+// remark and both may WRITE/edit it, so production arrangements stay aligned both ways.
+// The Boss writes the monthly summary.
+const WRITE_ROLES = ['production_lead', 'admin'];
 
 // Archive tables (column mirrors). The pg_cron jobs move old remarks here
 // (weekly: past weeks; quarterly: months > 3mo) so the live tables stay lean but
@@ -69,11 +70,12 @@ router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (re
       VALUES ($1, $2, $3, $4, $5)
     `, [id, req.user.id, wStart, wEnd, content]);
 
-    // Notify the audience: owners + the production lead, minus the author. (Production
-    // staff no longer read remarks, so they're not notified.)
+    // Notify the audience: owners + the production lead + the admin, minus the author,
+    // so Reenee and Misha always see each other's updates. (Production staff no longer
+    // read remarks, so they're not notified.)
     const recipients = (await q(
       "SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true",
-      [['super_admin', 'production_lead']]
+      [['super_admin', 'production_lead', 'admin']]
     )).rows;
     for (const r of recipients) {
       if (r.id === req.user.id) continue;
@@ -91,9 +93,8 @@ router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (re
 router.patch('/:id', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (req, res) => {
   const remark = (await query('SELECT * FROM production_remarks WHERE id = $1', [req.params.id])).rows[0];
   if (!remark) return res.status(404).json({ error: 'Not found' });
-  if (remark.author_id !== req.user.id && req.user.role !== 'super_admin') {
-    return res.status(403).json({ error: 'Not your remark' });
-  }
+  // Weekly remarks are a shared doc co-owned by the lead + admin (both in WRITE_ROLES),
+  // so any writer may edit regardless of who first created the row.
 
   await query('UPDATE production_remarks SET content = $1, updated_at = now() WHERE id = $2',
     [req.body.content, req.params.id]);
