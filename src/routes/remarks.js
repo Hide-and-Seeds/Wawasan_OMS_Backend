@@ -18,19 +18,41 @@ const WRITE_ROLES = ['production_lead', 'admin'];
 // nothing is lost — the reads below union them back so full history still shows.
 async function ensureArchives() {
   await query('CREATE TABLE IF NOT EXISTS production_remarks_archive (LIKE production_remarks)');
+  // Last-editor tracking (idempotent — covers fresh DBs and keeps the archive mirror aligned).
+  await query('ALTER TABLE production_remarks ADD COLUMN IF NOT EXISTS edited_by uuid REFERENCES users(id)');
+  await query('ALTER TABLE production_remarks ADD COLUMN IF NOT EXISTS edited_at timestamptz');
+  await query('ALTER TABLE production_remarks_archive ADD COLUMN IF NOT EXISTS edited_by uuid');
+  await query('ALTER TABLE production_remarks_archive ADD COLUMN IF NOT EXISTS edited_at timestamptz');
   await ensureMonthly();
   await query('CREATE TABLE IF NOT EXISTS monthly_remarks_archive (LIKE monthly_remarks)');
+}
+
+// Notify the remark audience (owners + lead + admin) of a post/edit, minus the actor,
+// so Reenee and Misha always see each other's changes.
+async function notifyRemarkAudience(q, actorId, title, message) {
+  const recipients = (await q(
+    "SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true",
+    [['super_admin', 'production_lead', 'admin']]
+  )).rows;
+  for (const r of recipients) {
+    if (r.id === actorId) continue;
+    await q(
+      "INSERT INTO notifications (id, user_id, type, title, message) VALUES ($1, $2, 'weekly_remark', $3, $4)",
+      [uuidv4(), r.id, title, message]
+    );
+  }
 }
 
 // GET /api/remarks — list all remarks (live + archived)
 router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
   await ensureArchives();
   const remarks = (await query(`
-    SELECT r.*, u.name AS author_name FROM (
+    SELECT r.*, u.name AS author_name, e.name AS editor_name FROM (
       SELECT * FROM production_remarks
       UNION ALL
       SELECT * FROM production_remarks_archive
     ) r LEFT JOIN users u ON r.author_id = u.id
+      LEFT JOIN users e ON e.id = r.edited_by
     ORDER BY r.week_start DESC
   `)).rows;
   res.json(remarks);
@@ -39,8 +61,9 @@ router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req,
 // GET /api/remarks/current — current week (Monday-anchored)
 router.get('/current', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
   const remark = (await query(`
-    SELECT r.*, u.name AS author_name FROM production_remarks r
+    SELECT r.*, u.name AS author_name, e.name AS editor_name FROM production_remarks r
     JOIN users u ON r.author_id = u.id
+    LEFT JOIN users e ON e.id = r.edited_by
     WHERE r.week_start = date_trunc('week', now())::date
     ORDER BY r.updated_at DESC LIMIT 1
   `)).rows[0];
@@ -70,20 +93,9 @@ router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (re
       VALUES ($1, $2, $3, $4, $5)
     `, [id, req.user.id, wStart, wEnd, content]);
 
-    // Notify the audience: owners + the production lead + the admin, minus the author,
-    // so Reenee and Misha always see each other's updates. (Production staff no longer
-    // read remarks, so they're not notified.)
-    const recipients = (await q(
-      "SELECT id FROM users WHERE role = ANY($1::text[]) AND is_active = true",
-      [['super_admin', 'production_lead', 'admin']]
-    )).rows;
-    for (const r of recipients) {
-      if (r.id === req.user.id) continue;
-      await q(`
-        INSERT INTO notifications (id, user_id, type, title, message)
-        VALUES ($1, $2, 'weekly_remark', 'New Weekly Remark', $3)
-      `, [uuidv4(), r.id, `${req.user.name} posted weekly remarks for w/c ${wStart}`]);
-    }
+    // Production staff no longer read remarks, so they're not notified.
+    await notifyRemarkAudience(q, req.user.id, 'New Weekly Remark',
+      `${req.user.name} posted weekly remarks for w/c ${wStart}`);
   });
 
   res.status(201).json({ id, week_start: wStart, week_end: wEnd });
@@ -95,9 +107,16 @@ router.patch('/:id', authenticate, authorize(...WRITE_ROLES), asyncHandler(async
   if (!remark) return res.status(404).json({ error: 'Not found' });
   // Weekly remarks are a shared doc co-owned by the lead + admin (both in WRITE_ROLES),
   // so any writer may edit regardless of who first created the row.
+  if (!req.body.content || !req.body.content.trim()) return res.status(400).json({ error: 'Content is required' });
 
-  await query('UPDATE production_remarks SET content = $1, updated_at = now() WHERE id = $2',
-    [req.body.content, req.params.id]);
+  const wStart = new Date(remark.week_start).toISOString().slice(0, 10);
+  await withTransaction(async (q) => {
+    await q('UPDATE production_remarks SET content = $1, updated_at = now(), edited_by = $2, edited_at = now() WHERE id = $3',
+      [req.body.content, req.user.id, req.params.id]);
+    // Edits used to be silent; notify the others so the change isn't missed.
+    await notifyRemarkAudience(q, req.user.id, 'Weekly Remark Updated',
+      `${req.user.name} updated the weekly remarks for w/c ${wStart}`);
+  });
   res.json({ message: 'Updated' });
 }));
 
