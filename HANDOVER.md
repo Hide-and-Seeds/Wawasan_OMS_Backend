@@ -4,6 +4,7 @@
 **Rebrand note:** originally "Wawasan Candle"; rebranded to **WAWASAN LTS**. Code/repos still carry the `wawasan-candle` / `wawasancandle` naming.
 **Doc date:** 2026-06-30 · **Maintainer handing over:** Leoric Kingdom
 **Live URL:** https://oms.wawasancandle.com
+**Repos:** GitHub org `Hide-and-Seeds` — `Wawasan_OMS_Backend` + `Wawasan_OMS_Frontend` (transferred from `leorickingdom-source`).
 
 > This is the single source of truth for the handover. Where it disagrees with older docs (e.g. `oms-backend/README.md`), **trust this document** — see [§14 Known gotchas](#14-known-gotchas--footguns) for the specific drifts.
 
