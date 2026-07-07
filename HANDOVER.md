@@ -65,7 +65,6 @@ Orders can also be put **On Hold** (e.g. waiting for stock) or **Cancelled** (or
 **Extra surfaces:**
 - **Floor Display** — a big read-only TV/kiosk view of the board for the factory floor.
 - **Reports** — production / packing / delivery KPIs, exportable to Excel & PDF.
-- **WhatsApp auto-messages** — optional customer notifications + a daily "morning brief" (off by default; see [§11.2](#112-whatsapp-auto-messages)).
 
 ---
 
@@ -121,7 +120,7 @@ The current list of real staff accounts lives in the app under **User Management
 
 ## 4. Architecture at a glance
 
-Three deployed pieces plus two optional on-prem/edge helpers:
+Three deployed pieces plus one optional on-prem helper:
 
 ```
                         ┌─────────────────────────────┐
@@ -141,9 +140,8 @@ Three deployed pieces plus two optional on-prem/edge helpers:
                         │  + pg_cron scheduled jobs     │  region: Seoul
                         └─────────────────────────────┘
 
-   On-prem / edge helpers (optional):
+   On-prem helper (optional):
    • SQL Account → OMS relay   runs on the office Windows PC (reads Firebird .FDB) → POSTs webhook
-   • WhatsApp worker (wa-worker) runs on a GCP VM behind Tailscale → polls backend, sends via whatsapp-web.js
 ```
 
 **Key facts**
@@ -174,13 +172,10 @@ oms-backend/
 │   │   ├── remarks.js        # production remarks (weekly/monthly)
 │   │   ├── reports.js        # dashboard + production/packing/delivery/audit/trend...
 │   │   ├── delivery.js       # deliveries, deliverers, proof, DO print
-│   │   ├── settings.js       # system_settings + holidays
-│   │   └── whatsapp.js       # queue, crons (enqueue/morning-brief), worker endpoints
+│   │   └── settings.js       # system_settings + holidays
 │   ├── lib/
 │   │   ├── supabaseClient.js # Supabase JS client (Storage)
-│   │   ├── whatsapp.js       # send provider (log | wwebjs) + throttle policy
-│   │   ├── sqlAccountCsv.js  # CSV invoice parsing
-│   │   └── orderPdf.js       # delivery order / invoice PDF (pdf-lib)
+│   │   └── sqlAccountCsv.js  # CSV invoice parsing
 │   └── utils/
 │       ├── db.js             # pg Pool + query() helper
 │       ├── migrate.js        # runs schema.sql
@@ -189,14 +184,13 @@ oms-backend/
 │       └── asyncHandler.js
 ├── schema.sql                # base Postgres schema (see §8 — live DB has drifted past this)
 ├── demo-seed.sql             # demo data for showcasing
-├── migrations/               # 001..007 incremental migrations (see §8.3)
+├── migrations/               # 001..008 incremental migrations (see §8.3)
 ├── reference-skus.md         # finished-goods STK reference
 ├── sql-account-bridge/       # on-prem SQL Account → OMS relay (see §11.1)
-├── wa-worker/                # WhatsApp worker (whatsapp-web.js) (see §11.2)
 ├── webhook-test/             # local webhook testers + client-facing preview
 ├── email-to-board/           # Google Apps Script email → board
-├── README.md  PLAN.md  INTEGRATION-NOTES.md  SQL-ACCOUNT-WEBHOOK.md  WHATSAPP-SETUP.md
-└── vercel.json               # rewrites all → /api ; defines the two cron jobs
+├── README.md  PLAN.md  INTEGRATION-NOTES.md  SQL-ACCOUNT-WEBHOOK.md
+└── vercel.json               # rewrites all → /api
 ```
 
 ### 5.2 `wawasan-oms-frontend/` — React + Vite SPA
@@ -206,7 +200,7 @@ wawasan-oms-frontend/
 ├── index.html
 ├── src/
 │   ├── main.jsx              # React root
-│   ├── App.jsx               # THE WHOLE APP — ~5,000 lines, single file (see §10)
+│   ├── App.jsx               # THE WHOLE APP — ~4,900 lines, single file (see §10)
 │   ├── App.css  index.css    # styling (mostly inline styles + theme object `C`)
 │   └── assets/               # logo, hero
 ├── public/
@@ -218,7 +212,7 @@ wawasan-oms-frontend/
 └── vercel.json               # SPA rewrite (all → /index.html)
 ```
 
-> **Note on `App.jsx`:** the entire frontend is one ~5,000-line file. It is organized top-to-bottom: API client → theme/constants → small helpers → components → page screens → root `App`. Search by the constant names in [§10.2](#102-key-constants--feature-flags).
+> **Note on `App.jsx`:** the entire frontend is one ~4,900-line file. It is organized top-to-bottom: API client → theme/constants → small helpers → components → page screens → root `App`. Search by the constant names in [§10.2](#102-key-constants--feature-flags).
 
 ### 5.3 Other top-level folders (workspace root)
 
@@ -261,7 +255,7 @@ npm run lint
 
 ## 7. Environment variables & secrets
 
-**Secrets are NOT in the repos.** They live in **Vercel project env vars** (per repo) and the on-prem/worker `.env` files. The `.env.example` files document every key.
+**Secrets are NOT in the repos.** They live in **Vercel project env vars** (per repo) and the on-prem `.env` files. The `.env.example` files document every key.
 
 ### 7.1 Backend (`oms-backend`)
 
@@ -280,11 +274,6 @@ npm run lint
 | `FRONTEND_URL` | Comma-separated allowed CORS origins (prod frontend URL). |
 | `SQL_ACCOUNT_WEBHOOK_SECRET` | Shared secret SQL Account relay must send as `x-webhook-secret`. **Blank = endpoint rejects everything (fail-closed).** |
 | `SQL_ACCOUNT_DEFAULT_LEAD_DAYS` | New webhook orders' delivery date = order date + this (default 7). |
-| `CRON_SECRET` | Vercel sends it as `Authorization: Bearer …` to cron paths. **Required** for the two crons. |
-| `WHATSAPP_WORKER_URL` | **Blank = safe `log` provider** (queues + logs, no real sends). Set to the wa-worker URL to send for real. |
-| `WHATSAPP_WORKER_SECRET` | Auth between backend ↔ wa-worker. |
-| `WHATSAPP_ADMIN_TO` | Phone that receives the morning brief. |
-| `WHATSAPP_DAILY_CAP` / `WINDOW_START` / `WINDOW_END` / `TZ_OFFSET_MIN` | Throttle policy (default 60/day, 9–21h, UTC+8). |
 
 ### 7.2 Frontend (`wawasan-oms-frontend`)
 
@@ -294,7 +283,6 @@ npm run lint
 
 ### 7.3 Other `.env`s
 - `oms-backend/sql-account-bridge/.env` and `windows-*/config.ps1` — relay target URL + webhook secret (on the office PC).
-- `oms-backend/wa-worker/.env` — worker secret + backend URL (on the GCP VM).
 
 ---
 
@@ -319,14 +307,14 @@ npm run lint
 | `deliveries` | Delivery schedule/proof. `signature_file` = Storage path. `status` pending/in_transit/delivered/failed. |
 | `system_settings` | Key/value app config (e.g. `session_timeout_hours`, `order_intake_enabled`, shared-password reveal). |
 | `holidays` | Working-calendar holidays (bulk-importable via CSV/Excel). |
-| `message_queue` | Outbound WhatsApp + morning brief. Idempotent per `(order_id, kind)`. `provider` log/wwebjs. |
 
 ### 8.2 Schema drift ⚠ (important for handover)
 
 `schema.sql` is the **original** schema. The **live DB has drifted past it** via migrations + direct edits. Notably, columns that exist live but are **not** in `schema.sql` include the **per-track packing PIC (`packing_pic_id`)** and split-order fields (e.g. `held_in_order`). **Always confirm the live shape** with `list_tables` / `\d orders` against Supabase before writing migrations — don't trust `schema.sql` alone.
 
 ### 8.3 Migrations (`oms-backend/migrations/`)
-`001_add_admin_role` · `002_item_status` · `003_deliverers` · `004_delivery_tracking` · `005_message_queue` · `006_purge_activity_log` · `007_purge_notifications`. Applied in the Supabase SQL editor. Later schema changes (per-track PIC, split fields) were applied directly and may not all have a numbered file — reconcile against live.
+`001_add_admin_role` · `002_item_status` · `003_deliverers` · `004_delivery_tracking` · `005_message_queue` · `006_purge_activity_log` · `007_purge_notifications` · `008_drop_message_queue`. Applied in the Supabase SQL editor. Later schema changes (per-track PIC, split fields) were applied directly and may not all have a numbered file — reconcile against live.
+> `005` created `message_queue` for the old WhatsApp feature; `008` drops it again after WhatsApp was removed. Run `008` in the Supabase SQL editor if it hasn't been applied.
 
 ### 8.4 Scheduled jobs (Supabase `pg_cron`)
 - **`purge-activity-log`** — monthly; **archives** `activity_log` rows > 1 month into an archive table, then trims (migration 006). Owner wanted a saved copy for audit.
@@ -336,7 +324,7 @@ npm run lint
 > ⚠ **Regression gap:** any code path that lazily creates monthly/archive tables (`ensureMonthly`/`ensureArchives`) creates them **without RLS enabled**. New tables should have `alter table … enable row level security;` added. See RLS note below.
 
 ### 8.5 Row-Level Security (RLS)
-As of the last audit: **all public tables RLS-enabled (0 ERROR-level advisories).** The backend connects as the Supabase pooler `postgres` role which is **BYPASSRLS**, so RLS doesn't block the API — it's defense-in-depth against direct DB access. The remaining `rls_enabled_no_policy` advisories are **INFO-level and intended** — do not "fix" them by adding permissive policies. (Memory: [[oms-rls-security-baseline]].) There are stale `*_bak_20260616` backup tables left in place by the owner's request — leave them.
+As of the last audit: **all public tables RLS-enabled (0 ERROR-level advisories).** The backend connects as the Supabase pooler `postgres` role which is **BYPASSRLS**, so RLS doesn't block the API — it's defense-in-depth against direct DB access. The remaining `rls_enabled_no_policy` advisories are **INFO-level and intended** — do not "fix" them by adding permissive policies. There are stale `*_bak_20260616` backup tables left in place by the owner's request — leave them.
 
 ### 8.6 Backups & demo data
 - `demo-seed.sql` rebuilds demo data from real SKU master + sample invoices.
@@ -360,7 +348,7 @@ As of the last audit: **all public tables RLS-enabled (0 ERROR-level advisories)
 ### 9.2 Roles & RBAC
 The 6 DB roles and their app labels are in [§2](#2-who-uses-it-roles). Exact per-endpoint membership lives in the `const *_ROLES` arrays at the top of each route file (`ADMIN_ROLES`, `DASHBOARD_ROLES`, `PROD_REPORT_ROLES`, `DELIVERY_REPORT_ROLES`, `USER_VIEWERS`, `USER_MANAGERS`, `READ_ROLES`, `WRITE_ROLES`). The frontend mirrors these gates so staff don't see buttons that would only 403 (see `canAdvanceStage` / `canMarkStage` / `visibleStages` / `NAV` in `App.jsx`).
 
-**Shared password:** `seed.js` and `reset-passwords.js` set **one shared password `wawasan123`** for all accounts ("for now", per the owner). A per-role restore map exists if individual passwords are wanted again (memory: [[oms-shared-password]]). **Recommend rotating + moving off a shared password at handover.**
+**Shared password:** `seed.js` and `reset-passwords.js` set **one shared password `wawasan123`** for all accounts ("for now", per the owner). A per-role restore map exists if individual passwords are wanted again. **Recommend rotating + moving off a shared password at handover.**
 
 ### 9.3 API reference (current — supersedes README)
 
@@ -404,7 +392,6 @@ Base path `/api`. Access column: **auth** = any logged-in user; named roles = `a
 **Reports** (`routes/reports.js`): `dashboard` (DASHBOARD_ROLES); `production`, `packing`, `staff`, `staff/:id`, `pic`, `efficiency` (PROD_REPORT_ROLES); `delivery`, `delivery/carrier` (DELIVERY_REPORT_ROLES); `orders`, `mistakes`, `trend` (ADMIN_ROLES); `audit` (super_admin, admin); `scorecard` (auth). Add `?period=` or `?from=&to=`.
 **Delivery** (`routes/delivery.js`): `GET /delivery`, `POST /delivery`, `POST /delivery/:id/deliver` (+signature upload), `POST /delivery/quick-deliver`, `POST /delivery/:id/reopen`, `PATCH /delivery/:id`, deliverer CRUD (`/delivery/deliverers…`), `POST /delivery/mark-do-printed` (auth).
 **Settings** (`routes/settings.js`): `GET /settings`, `GET /settings/holidays` (auth); `PUT /settings`, holiday create/delete/bulk (super_admin, admin).
-**WhatsApp** (`routes/whatsapp.js`): crons `GET|POST /whatsapp/enqueue`, `/whatsapp/morning-brief` (cron secret or admin); `GET /whatsapp/queue`, `POST /whatsapp/test|cancel|redirect`, `GET /whatsapp/order-pdf/:orderId` (ADMIN_ROLES); `GET /whatsapp/worker/next`, `POST /whatsapp/worker/result` (worker secret).
 **Health:** `GET /api/health` (public).
 
 ### 9.4 Order lifecycle specifics
@@ -417,7 +404,7 @@ Base path `/api`. Access column: **auth** = any logged-in user; named roles = `a
 ## 10. Frontend (React/Vite)
 
 ### 10.1 Stack & shape
-React 19 + Vite 8. Charts via `recharts`; exports via `xlsx` (Excel) and `jspdf` + `jspdf-autotable` (PDF). **Everything is in `src/App.jsx` (~5,000 lines)** — one file, organized top-to-bottom. Styling is mostly inline styles driven by a theme object `C` (dark "candle" palette) plus `App.css`/`index.css`.
+React 19 + Vite 8. Charts via `recharts`; exports via `xlsx` (Excel) and `jspdf` + `jspdf-autotable` (PDF). **Everything is in `src/App.jsx` (~4,900 lines)** — one file, organized top-to-bottom. Styling is mostly inline styles driven by a theme object `C` (dark "candle" palette) plus `App.css`/`index.css`.
 
 API client (top of `App.jsx`): `api(method, path, body, isFormData)` reads `VITE_API_URL`, attaches `Bearer` from `localStorage.oms_token`, throws on non-2xx with the server's `error` string.
 
@@ -456,41 +443,33 @@ At the top of `App.jsx`:
 - **`windows-no-node/`** — no-Node PowerShell CSV relay (interim).
 - **`bridge.mjs`** — Firebird-direct poll route (`fromFirebird`, stubbed) — the eventual "instant, no export" path; needs Node + `node-firebird` + the live `.FDB` table names on-prem.
 
-**Schema reference** (reverse-engineered): sales invoices = `SL_IV` + `SL_IVDTL` joined on `DOCKEY` (NOT `IV`/`IVDTL`; `AR_IV` is financial). `SL_IV` has `COMPANYNAME`, `DADDRESS1-4`, `CANCELLED`, `LASTMODIFIED`. (Memory: [[oms-sqlaccount-firebird-schema]].)
+**Schema reference** (reverse-engineered): sales invoices = `SL_IV` + `SL_IVDTL` joined on `DOCKEY` (NOT `IV`/`IVDTL`; `AR_IV` is financial). `SL_IV` has `COMPANYNAME`, `DADDRESS1-4`, `CANCELLED`, `LASTMODIFIED`.
 
 **Kill switch:** Boss can pause order intake via `system_settings.order_intake_enabled`.
 
 > PowerShell relay gotchas that bit this before: `Get-Content -Raw` strings carry note-properties → `ConvertTo-Json` emits an object not a bare string (cast `[string]`); `.ps1` ship scripts must be ASCII (PS 5.1 misreads no-BOM UTF-8). See [§14](#14-known-gotchas--footguns).
 
-### 11.2 WhatsApp auto-messages
-
-**Default is OFF/safe.** `src/lib/whatsapp.js` picks the provider: `WHATSAPP_WORKER_URL` blank → **`log`** provider (queues + logs "sends", fully testable, no SIM). Set the URL → **`wwebjs`** (real sends via the worker).
-
-- **Worker:** `oms-backend/wa-worker/server.mjs` — an always-on **whatsapp-web.js** process on a **GCP VM behind Tailscale**. It polls `GET /api/whatsapp/worker/next` and reports via `POST /api/whatsapp/worker/result` (authed by `WHATSAPP_WORKER_SECRET`).
-- **Queue:** `message_queue` table; idempotent per `(order_id, kind)`. Kinds: received / out_for_delivery / delivered / morning_brief / test.
-- **Crons** (Vercel, defined in `oms-backend/vercel.json`): `whatsapp/enqueue` daily `0 0 * * *`; `whatsapp/morning-brief` daily `0 23 * * *`. Both need `CRON_SECRET`.
-- **Throttle:** `WHATSAPP_DAILY_CAP` (60), send window 9–21h, UTC+8 — to stay under Meta's ban radar.
-- Setup + cold-swap recovery: **`oms-backend/WHATSAPP-SETUP.md`** and the `whatsapp-web-bot` skill. ⚠ Use a **dedicated disposable SIM**.
-
-### 11.3 Email → board (optional)
+### 11.2 Email → board (optional)
 `oms-backend/email-to-board/email-to-board.gs` — a Google Apps Script that turns inbound emails into board orders. See `EMAIL-TO-BOARD-SETUP.md`.
+
+> **Removed:** the OMS previously had a WhatsApp auto-message feature (customer notifications + a daily "morning brief") built on `whatsapp-web.js` + an outbound `message_queue` + a GCP worker. It was **removed entirely** (2026-07). If customer messaging is ever wanted again, prefer the official WhatsApp Cloud API rather than reviving the unofficial worker.
 
 ---
 
 ## 12. Deployment (Vercel)
 
-**Both repos auto-deploy on push to `main`** (GitHub org `leorickingdom-source`). Confirm before pushing — push *is* the ship action (memory: [[ask-before-pushing]]).
+**Both repos auto-deploy on push to `main`** (GitHub org `leorickingdom-source`). Confirm before pushing — push *is* the ship action.
 
 - **Frontend:** Vite framework preset; SPA rewrite all→`/index.html`. Set `VITE_API_URL` to the backend `/api` URL.
-- **Backend:** `vercel.json` rewrites all→`/api` (the Express app in `api/index.js`). Function **pinned to region `icn1` (Seoul)** to colocate with the DB (set in the Vercel dashboard, not the repo). Defines the two WhatsApp crons.
+- **Backend:** `vercel.json` rewrites all→`/api` (the Express app in `api/index.js`). Function **pinned to region `icn1` (Seoul)** to colocate with the DB (set in the Vercel dashboard, not the repo).
 - **CORS** (`src/index.js`): allows the explicit `FRONTEND_URL` list, any `*.vercel.app` host (prod + every preview deploy), `localhost`, and `*.wawasancandle.com`. CORS isn't the auth boundary (JWT bearer is), so allowing Vercel hosts is safe and avoids chasing preview URLs.
 - **Custom domain:** `oms.wawasancandle.com` — Hostinger **CNAME → Vercel**.
 
-**Verify a deploy:** check `state: READY` via `list_deployments` (trust this over the branch-alias `get_deployment`, which lags). Diagnose prod 500s with `get_runtime_logs`. (Memory: [[oms-vercel-verify]].)
+**Verify a deploy:** check `state: READY` via `list_deployments` (trust this over the branch-alias `get_deployment`, which lags). Diagnose prod 500s with `get_runtime_logs`.
 
 > ⚠ **Two Vercel footguns:**
 > 1. The deploy webhook can **silently miss a push** → tell the owner to click **Redeploy** in the dashboard (an empty commit does *not* reliably retrigger).
-> 2. The `deploy_to_vercel` MCP tool, run from this workspace, publishes the **Hide & Seeds** site (`hns-preview`), **NOT** the OMS. To ship OMS, push to the repo. (Memory: [[env-vercel-deploy-target]].)
+> 2. The `deploy_to_vercel` MCP tool, run from this workspace, publishes the **Hide & Seeds** site (`hns-preview`), **NOT** the OMS. To ship OMS, push to the repo.
 
 ---
 
@@ -510,15 +489,15 @@ At the top of `App.jsx`:
 - `npm run seed` (users + sample orders) or run `demo-seed.sql` in Supabase. Demo purge backups are in `backups/`.
 
 **Remove test orders** (Rock leaves `test*` junk)
-- **Back up first** (export the rows to JSON), then FK-safe delete (loop over the order_id-referencing tables) via Supabase MCP. `orders` uses `stage`, not `status`. (Memory: [[oms-test-order-cleanup]].)
+- **Back up first** (export the rows to JSON), then FK-safe delete (loop over the order_id-referencing tables) via Supabase MCP. `orders` uses `stage`, not `status`.
 
 **Diagnose a prod 500**
 - `get_runtime_logs` (Vercel) for the backend function; check `get_advisors` / `get_logs` (Supabase) for DB issues.
 
 **Rotate secrets**
-- Update in the Vercel dashboard (backend project) + the on-prem/worker `.env`. Rotating `JWT_SECRET` logs everyone out.
+- Update in the Vercel dashboard (backend project) + the on-prem `.env`. Rotating `JWT_SECRET` logs everyone out.
 
-**Avoid:** hard deletes (owner finds them dangerous — prefer Cancel/deactivate); rebuilding removed features (importance tiers, board VIP/priority tiers, 3rd-party courier hand-off — all deliberately removed).
+**Avoid:** hard deletes (owner finds them dangerous — prefer Cancel/deactivate); rebuilding removed features (importance tiers, board VIP/priority tiers, 3rd-party courier hand-off, WhatsApp auto-messages — all deliberately removed).
 
 ---
 
@@ -530,7 +509,7 @@ At the top of `App.jsx`:
 - **`rls_enabled_no_policy` is intended** — don't add permissive policies to "fix" the INFO advisories (§8.5).
 - **Vercel deploy webhook can miss a push** → click Redeploy, not an empty commit (§12).
 - **`deploy_to_vercel` tool ≠ OMS** — it ships Hide & Seeds; push to the repo to ship OMS (§12).
-- **PowerShell commit quoting** — here-strings with embedded `"` break (pathspec error, commit lost). Use plain text or `git commit -F file`. (Memory: [[env-ps-git-commit]].)
+- **PowerShell commit quoting** — here-strings with embedded `"` break (pathspec error, commit lost). Use plain text or `git commit -F file`.
 - **PowerShell `Get-Content -Raw` → JSON object trap** — note-props make `ConvertTo-Json` emit `{value,PSPath…}` not a bare string; cast `[string]` / use `[IO.File]::ReadAllText`. Broke the CSV relay once.
 - **`.ps1` ship scripts must be ASCII** — PS 5.1 misreads no-BOM UTF-8 as ANSI; smart quotes/em-dashes throw a fake "Missing closing '}'" on an unrelated line.
 - **Vite CJS default-export trap** — prod bundle may hand a CJS lib's default as `{default: fn}`; unwrap before calling (broke `jspdf-autotable` PDFs).
@@ -547,9 +526,8 @@ At the top of `App.jsx`:
 | **Vercel** | 2 projects under the same team | Backend region `icn1`. Env vars live here. Custom domain attached to the frontend. |
 | **Supabase** | project ref `thoanddicghbjchomhra` (Seoul) | Postgres + Storage (`oms-uploads`) + pg_cron. SQL editor for schema/seed. |
 | **Domain / DNS** | Hostinger | `oms.wawasancandle.com` CNAME → Vercel. CORS also allows `*.wawasancandle.com`. |
-| **WhatsApp worker** | GCP VM + Tailscale | Always-on `whatsapp-web.js` (`wa-worker`). Disposable SIM. |
 | **SQL Account** | client office Windows PC | Embedded Firebird; live DB `ACC-0009.FDB`. Runs the `WawasanOMS-FactorySync` relay. |
-| **Existing docs** | `oms-backend/*.md` + root `.docx` | README, PLAN, INTEGRATION-NOTES, SQL-ACCOUNT-WEBHOOK, WHATSAPP-SETUP; Simple Guide / Staff Guide / SQL Account Integration Handover. |
+| **Existing docs** | `oms-backend/*.md` + root `.docx` | README, PLAN, INTEGRATION-NOTES, SQL-ACCOUNT-WEBHOOK; Simple Guide / Staff Guide / SQL Account Integration Handover. |
 
 ---
 
@@ -563,14 +541,13 @@ At the top of `App.jsx`:
 - **Split board** — showing one order in multiple columns by line, so tracks run in parallel.
 - **Send to production** — advancing an order out of the Order column (office sets expiry; PIC nudge follows).
 - **Floor Display** — read-only kiosk/TV board for the factory floor (30-day kiosk token).
-- **Morning brief** — daily WhatsApp summary to the admin number.
 
-**Regenerating the Word copy**
-This environment has no Word/pandoc/`python-docx`. The `.docx` is hand-built as OOXML via Python `zipfile`. To regenerate the Word version of this handover:
+**Regenerating the Word copies**
+This environment has no Word/pandoc/`python-docx`. The `.docx` files are hand-built as OOXML via Python `zipfile`. To regenerate the Word versions of the handover + transfer docs:
 ```bash
-python _make_handover.py        # → "Wawasan OMS - Technical Handover.docx" (workspace root)
+python _make_handover.py        # → "Wawasan OMS - Technical Handover.docx" + "Wawasan OMS - Account Transfer Runbook.docx"
 ```
-Keep `HANDOVER.md` as the source of truth; regenerate the `.docx` from it when it changes.
+Keep `HANDOVER.md` / `TRANSFER.md` as the source of truth; regenerate the `.docx` from them when they change.
 
 ---
 

@@ -16,10 +16,6 @@ SQL Account invoice  ──►  POST /api/orders/webhook/sql-account
    Ops assigns PIC ──► Production ──► Packing ──► Ready for Delivery ──► Delivered
 ```
 
-The WhatsApp "order received / in production" message to the customer is **not**
-sent here — the daily enqueue sweep raises it automatically once the order
-leaves the Order column, so nothing extra is needed on the SQL Account side.
-
 ## Endpoint
 
 | | |
@@ -38,7 +34,7 @@ endpoint **rejects every request** (fail-closed) — this is deliberate.
 |---|---|---|---|
 | `invoice_number` | ✅ | Doc No. (e.g. `SI26060059`) | Unique key — a repeat is ignored (409). |
 | `customer_name` | ✅ | Billing customer | |
-| `customer_contact` | — | Tel | Used for the WhatsApp update; a mobile (60…) reaches the customer. |
+| `customer_contact` | — | Tel | Stored on the order for reference. |
 | `delivery_address` | — | Delivery / ship-to address | Shown to dispatch on the Ready-for-Delivery list. Optional — if omitted, staff type it in the app. |
 | `items[]` | — | Invoice lines | `{ sku, name, quantity, unit }` — see below. |
 | `items[].sku` | — | Item code (e.g. `STK006`) | Defaults to `N/A` if absent. |

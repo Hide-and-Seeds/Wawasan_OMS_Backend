@@ -49,9 +49,6 @@ app.use('/api/remarks',       require('./routes/remarks'));
 app.use('/api/reports',       require('./routes/reports'));
 app.use('/api/delivery',      require('./routes/delivery'));
 app.use('/api/settings',      require('./routes/settings'));
-// Isolated: a load error in the (newer) WhatsApp route must not take down the API.
-try { app.use('/api/whatsapp', require('./routes/whatsapp')); }
-catch (e) { console.error('WhatsApp route failed to load — skipping:', e && e.message); }
 
 // ─── Health check ───
 app.get('/api/health', (req, res) => {
