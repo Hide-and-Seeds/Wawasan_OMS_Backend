@@ -2,9 +2,10 @@
 
 **System:** Wawasan LTS Order Management System (OMS) — a kanban-style order-tracking app for a candle / firestarter factory.
 **Rebrand note:** originally "Wawasan Candle"; rebranded to **WAWASAN LTS**. Code/repos still carry the `wawasan-candle` / `wawasancandle` naming.
-**Doc date:** 2026-06-30 · **Maintainer handing over:** Leoric Kingdom
+**Doc date:** 2026-07-07 · **Maintainer handing over:** Leoric Kingdom
 **Live URL:** https://oms.wawasancandle.com
 **Repos:** GitHub org `Hide-and-Seeds` — `Wawasan_OMS_Backend` + `Wawasan_OMS_Frontend` (transferred from `leorickingdom-source`).
+**Ownership status (2026-07-07):** mid-transfer to the **Hide & Seeds** studio — GitHub + Supabase already moved to studio accounts; the Vercel projects are still on the developer's personal team (the one piece left). Full state in [§15](#15-external-accounts--resources).
 
 > This is the single source of truth for the handover. Where it disagrees with older docs (e.g. `oms-backend/README.md`), **trust this document** — see [§14 Known gotchas](#14-known-gotchas--footguns) for the specific drifts.
 
@@ -146,7 +147,8 @@ Three deployed pieces plus one optional on-prem helper:
 ```
 
 **Key facts**
-- **Hosting:** both apps on Vercel, under the GitHub org `leorickingdom-source`. **Push to `main` = auto-deploy.**
+- **Code:** GitHub org **`Hide-and-Seeds`** — repos `Wawasan_OMS_Backend` + `Wawasan_OMS_Frontend` (both **public** since the 2026-07-07 move; old `leorickingdom-source` URLs still redirect). **Push to `main` = auto-deploy** via Vercel's Git integration.
+- **Hosting:** both apps on **Vercel** (frontend = static, backend = serverless fn). ⚠ The Vercel projects still sit on the developer's **personal team `leorickingdom-source`** — the only piece not yet moved to the studio (blocked on a studio Pro plan). See [§15](#15-external-accounts--resources).
 - **DB:** Supabase Postgres, Seoul region. Backend function is pinned to **`icn1` (Seoul)** to sit next to the DB (fixed a Pacific-crossing latency problem).
 - **Auth:** stateless **JWT bearer tokens** (not cookies). Token stored in browser `localStorage` under `oms_token`.
 - **No money data** anywhere in the OMS — financials stay in SQL Account.
@@ -459,7 +461,7 @@ At the top of `App.jsx`:
 
 ## 12. Deployment (Vercel)
 
-**Both repos auto-deploy on push to `main`** (GitHub org `leorickingdom-source`). Confirm before pushing — push *is* the ship action.
+**Both repos auto-deploy on push to `main`** (GitHub org `Hide-and-Seeds` — `Wawasan_OMS_Backend` / `Wawasan_OMS_Frontend`). Confirm before pushing — push *is* the ship action. ⚠ The **Vercel projects are still on the developer's personal team `leorickingdom-source`** (transfer pending); the Git integration already points at the studio-org repos, so pushes deploy normally.
 
 - **Frontend:** Vite framework preset; SPA rewrite all→`/index.html`. Set `VITE_API_URL` to the backend `/api` URL.
 - **Backend:** `vercel.json` rewrites all→`/api` (the Express app in `api/index.js`). Function **pinned to region `icn1` (Seoul)** to colocate with the DB (set in the Vercel dashboard, not the repo).
@@ -523,9 +525,9 @@ At the top of `App.jsx`:
 
 | What | Where | Notes |
 |---|---|---|
-| **GitHub** | org `leorickingdom-source` | 2 repos (frontend, backend); push to `main` auto-deploys. |
-| **Vercel** | 2 projects under the same team | Backend region `icn1`. Env vars live here. Custom domain attached to the frontend. |
-| **Supabase** | project ref `thoanddicghbjchomhra` (Seoul) | Postgres + Storage (`oms-uploads`) + pg_cron. SQL editor for schema/seed. |
+| **GitHub** ✅ moved | org **`Hide-and-Seeds`** — `Wawasan_OMS_Backend`, `Wawasan_OMS_Frontend` (public) | Moved + renamed 2026-07-07. Push to `main` auto-deploys. Old `leorickingdom-source` URLs still redirect. |
+| **Vercel** ⏳ pending | 2 projects still on personal team `leorickingdom-source` (`team_6tkLqHfcYqXNydc83vifWgqg`) | Backend region `icn1`. **Env vars live here** (the secrets home). Custom domain attached to the frontend. The one piece not yet transferred — blocked on a studio Pro plan. |
+| **Supabase** ✅ moved | project ref `thoanddicghbjchomhra` (Seoul), now under the studio org | Ref unchanged by the move → **no env rewiring**. Postgres + Storage (`oms-uploads`) + pg_cron. SQL editor for schema/seed. |
 | **Domain / DNS** | Hostinger | `oms.wawasancandle.com` CNAME → Vercel. CORS also allows `*.wawasancandle.com`. |
 | **SQL Account** | client office Windows PC | Embedded Firebird; live DB `ACC-0009.FDB`. Runs the `WawasanOMS-FactorySync` relay. |
 | **Existing docs** | `oms-backend/*.md` + root `.docx` | README, PLAN, INTEGRATION-NOTES, SQL-ACCOUNT-WEBHOOK; Simple Guide / Staff Guide / SQL Account Integration Handover. |
