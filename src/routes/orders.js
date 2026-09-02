@@ -54,6 +54,10 @@ const STAGE_OWNERS = { production: ['production_staff', 'production_lead'], pack
 // customer is, separate from `priority` (which flags a rush order). Low → high.
 const VALID_IMPORTANCE = ['standard', 'priority', 'vip'];
 // Per-SKU completion is tracked by status only (replaces the old made_qty count).
+// A line quantity ceiling. `quantity` is an unbounded numeric in the schema, and both
+// the carton counters and the board's carton aggregates cast to integer, so an
+// implausible quantity could take the shared kanban query down for every user.
+const MAX_LINE_QTY = 1000000000;
 const VALID_ITEM_STATUS = ['not_started', 'in_progress', 'done'];
 // Production-floor roles must not see *who* the customer is; they get the
 // importance tier in its place. Ops/Admin and delivery_team keep the name.
@@ -153,6 +157,11 @@ async function ensureItemColumns() {
   // Split board — a line individually parked back in the Order column (sent back from
   // Production/Packing, or not yet released). Overrides the made/pack board placement.
   await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS held_in_order boolean NOT NULL DEFAULT false');
+  // Carton progress. `made_qty` predates the 3-state status and was left unwritten when
+  // status replaced it; it is now written again alongside status, and packing gets the
+  // matching counter it never had. Both stay optional: a line with qty 0 and a status
+  // set by the old buttons behaves exactly as it did before.
+  await query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS pack_qty integer NOT NULL DEFAULT 0');
   // Backfill status from the legacy made / made_qty fields (one-time; cheap no-op afterwards).
   await query("UPDATE order_items SET status = CASE WHEN made THEN 'done' WHEN made_qty > 0 THEN 'in_progress' ELSE 'not_started' END WHERE status = 'not_started' AND (made = true OR made_qty > 0)");
   _itemColsReady = true;
@@ -274,9 +283,14 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND (CASE WHEN o.stage = 'packing' THEN pack_made ELSE made END)) AS made_count,
       (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status,
       EXISTS(SELECT 1 FROM activity_log al WHERE al.order_id = o.id AND al.action = 'item_edited') AS edited,
+      (SELECT NULLIF(LEAST(COALESCE(SUM(ROUND(oi.quantity)), 0), 2147483647)::int, 0) FROM order_items oi
+         WHERE oi.order_id = o.id AND upper(oi.unit) = 'CTN') AS ctn_total,
+      (SELECT LEAST(COALESCE(SUM(CASE WHEN o.stage = 'packing' THEN oi.pack_qty ELSE oi.made_qty END), 0), 2147483647)::int
+         FROM order_items oi WHERE oi.order_id = o.id AND upper(oi.unit) = 'CTN') AS ctn_done,
       COALESCE((SELECT json_agg(json_build_object(
         'id', oi.id, 'sku', oi.sku, 'name', oi.name, 'quantity', oi.quantity, 'unit', oi.unit,
         'made', oi.made, 'pack_made', oi.pack_made, 'status', oi.status, 'pack_status', oi.pack_status,
+        'made_qty', oi.made_qty, 'pack_qty', oi.pack_qty,
         'held_in_order', oi.held_in_order
       ) ORDER BY oi.id) FROM order_items oi WHERE oi.order_id = o.id), '[]'::json) AS items
     FROM orders o
@@ -988,8 +1002,11 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   const canAmend = ['super_admin', 'admin'].includes(req.user.role);
   const b = req.body || {};
   const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
-  // Items are tracked by status only: not_started → in_progress → done.
-  const progressing = b.status !== undefined;
+  // Items are tracked by status; a caller may instead send `qty_done`, the number of
+  // cartons finished on this track, and let the status follow from it. Sending neither
+  // leaves progress untouched, so every existing caller behaves exactly as before.
+  const countingQty = b.qty_done !== undefined;
+  const progressing = b.status !== undefined || countingQty;
 
   // Split board — send a packing line back to Production (undo a premature "Done").
   // Supervisors only. Resets the line's completion flags, then keeps the order's stage
@@ -1010,7 +1027,10 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
     return res.json({ ok: true });
   }
 
-  if (progressing && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
+  if (b.status !== undefined && !VALID_ITEM_STATUS.includes(b.status)) return res.status(400).json({ error: 'Invalid item status' });
+  if (countingQty && !(typeof b.qty_done === 'number' && Number.isFinite(b.qty_done))) {
+    return res.status(400).json({ error: 'qty_done must be a number' });
+  }
   if (editingFields && !canAmend) return res.status(403).json({ error: 'Line items are locked once an order is placed — only status can change. Correct STKs/quantities in SQL Account.' });
   if (progressing && !canMark) return res.status(403).json({ error: 'Insufficient permissions' });
   // Which completion track this write targets — production (made/status) or packing
@@ -1031,23 +1051,45 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
       return res.status(403).json({ error: 'You can only update items while the order is in your stage' });
     }
   }
+  // Resolve the line's quantity and its intended progress once, before anything reads
+  // them. A carton count always wins over a status sent alongside it, and every check
+  // below uses this same answer — the guard, the write and the log previously derived it
+  // separately and drifted apart.
+  const qty = b.quantity !== undefined
+    ? Math.min(MAX_LINE_QTY, Math.max(0, Math.round(Number(b.quantity) || 0)))
+    : Math.round(Number(item.quantity) || 0);
+  const doneQty = countingQty ? Math.min(qty, Math.max(0, Math.round(b.qty_done))) : null;
+  const effStatus = countingQty
+    ? (doneQty <= 0 ? 'not_started' : (doneQty >= qty && qty > 0 ? 'done' : 'in_progress'))
+    : b.status;
+
   // A line can't be packed before it's produced. Only enforced for explicit packing
   // writes from the split board; the normal packing-stage flow is left unchanged.
-  if (progressing && b.track === 'packing' && b.status !== 'not_started' && !item.made) {
+  if (progressing && b.track === 'packing' && !item.made && effStatus !== 'not_started') {
     return res.status(409).json({ error: 'Produce this item before packing it.' });
   }
 
   const sets = [];
   const vals = [];
-  // Resolve effective quantity first so completion is clamped against the new value.
-  const qty = b.quantity !== undefined ? Math.max(0, Math.round(Number(b.quantity) || 0)) : Math.round(Number(item.quantity) || 0);
   if (b.quantity !== undefined) sets.push(`quantity = $${vals.push(qty)}`);
   if (b.sku !== undefined) sets.push(`sku = $${vals.push(b.sku)}`);
   if (b.name !== undefined) sets.push(`name = $${vals.push(b.name)}`);
   if (b.unit !== undefined) sets.push(`unit = $${vals.push(b.unit)}`);
 
   if (progressing) {
-    const status = b.status;
+    // A carton count is the source of truth when one is sent: none started → not_started,
+    // all cartons done → done, anything between → in_progress. Clamped to the line's
+    // ordered quantity so a typo cannot report more finished than were ever ordered.
+    const qtyCol = track === 'packing' ? 'pack_qty' : 'made_qty';
+    const status = effStatus;
+    if (countingQty) {
+      sets.push(`${qtyCol} = $${vals.push(doneQty)}`);
+    } else {
+      // Status set by the buttons still keeps the counter honest at the two ends, so the
+      // floor never shows "8 of 21" against a line someone has just marked done.
+      if (b.status === 'done') sets.push(`${qtyCol} = $${vals.push(qty)}`);
+      if (b.status === 'not_started') sets.push(`${qtyCol} = $${vals.push(0)}`);
+    }
     // Write to the column set for the chosen track: packing → pack_*, production →
     // the production columns. Keep the matching `made` boolean in sync so the board /
     // floor "SKUs done" counts keep working.
@@ -1073,10 +1115,14 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
     if (target !== ord.stage) await query('UPDATE orders SET stage = $1, updated_at = now() WHERE id = $2', [target, ord.id]);
   }
   let action = 'item_edited';
-  if (progressing) action = b.status === 'done' ? 'item_made' : b.status === 'in_progress' ? 'item_progress' : 'item_reopened';
+  if (progressing) {
+    action = effStatus === 'done' ? 'item_made' : effStatus === 'in_progress' ? 'item_progress' : 'item_reopened';
+  }
   await logActivity(query, {
     orderId: req.params.id, userId: req.user.id, action,
-    details: progressing ? `${item.sku} — ${item.name} (${b.status})` : `${item.sku} — ${item.name}`,
+    details: progressing
+      ? `${item.sku} — ${item.name} (${countingQty ? `${doneQty}/${qty} ${item.unit || 'pcs'}` : effStatus})`
+      : `${item.sku} — ${item.name}`,
     ipAddress: req.ip || null,
   });
 

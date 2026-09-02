@@ -300,7 +300,7 @@ npm run lint
 | `users` | Accounts. `role` CHECK ∈ the 6 roles. `is_active` gates login. `password` = bcrypt hash. |
 | `sessions`, `password_reset_tokens` | Present in schema; the app is **stateless JWT**, so `sessions` is largely vestigial and the reset flow was removed. |
 | `orders` | Core. `stage` ∈ order/production/packing/ready_for_delivery/delivered/cancelled/on_hold. `priority` normal/urgent. `importance` standard/priority/vip (**kept but unused** — tiers removed). `pic_id` = production PIC. `source` sql_account/manual. `skip_production`, `on_hold`, `waiting_stock`, `expiry_date`. |
-| `order_items` | Per-SKU lines. Tracks **two independent tracks**: production (`status`, `made`, `made_qty`, `made_by`) and packing (`pack_status`, `pack_made`, `pack_made_by`). This dual-track is what powers the split board. |
+| `order_items` | Per-SKU lines. Tracks **two independent tracks**: production (`status`, `made`, `made_qty`, `made_by`) and packing (`pack_status`, `pack_made`, `pack_qty`, `pack_made_by`). This dual-track is what powers the split board. `made_qty` / `pack_qty` count cartons finished on each track and are written again as of migration 009 — send `qty_done` on the item PATCH and the status is derived from the count. Only lines with `unit = 'CTN'` carry a carton figure; everything else keeps the plain 3-state status. |
 | `order_attachments` | Files in Supabase Storage (`filename` = object path). |
 | `activity_log` | Audit trail. Monthly pg_cron archives + trims (see §8.4). |
 | `stage_transitions` | Stage move history (powers timing reports). |
