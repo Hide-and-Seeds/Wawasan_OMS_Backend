@@ -283,7 +283,7 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.id AND (CASE WHEN o.stage = 'packing' THEN pack_made ELSE made END)) AS made_count,
       (SELECT d.status FROM deliveries d WHERE d.order_id = o.id AND d.status NOT IN ('delivered','failed') ORDER BY d.created_at DESC LIMIT 1) AS delivery_status,
       EXISTS(SELECT 1 FROM activity_log al WHERE al.order_id = o.id AND al.action = 'item_edited') AS edited,
-      (SELECT NULLIF(LEAST(SUM(ROUND(oi.quantity)), 2147483647)::int, 0) FROM order_items oi
+      (SELECT NULLIF(LEAST(COALESCE(SUM(ROUND(oi.quantity)), 0), 2147483647)::int, 0) FROM order_items oi
          WHERE oi.order_id = o.id AND upper(oi.unit) = 'CTN') AS ctn_total,
       (SELECT LEAST(COALESCE(SUM(CASE WHEN o.stage = 'packing' THEN oi.pack_qty ELSE oi.made_qty END), 0), 2147483647)::int
          FROM order_items oi WHERE oi.order_id = o.id AND upper(oi.unit) = 'CTN') AS ctn_done,
