@@ -34,6 +34,11 @@ async function authenticate(req, res, next) {
   }
 }
 
+// Guard on the role name itself. Almost every route now guards on a named capability
+// instead (lib/capabilities.js) so the owners can change who gets what without a
+// deploy; this is left for the handful of rules that are deliberately NOT editable —
+// today just the permissions panel, which has to stay Boss-only or a role could be
+// granted the power to grant itself anything.
 function authorize(...roles) {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
@@ -43,12 +48,7 @@ function authorize(...roles) {
   };
 }
 
-function canMoveOrders(req, res, next) {
-  const allowed = ['super_admin'];
-  if (!allowed.includes(req.user.role)) {
-    return res.status(403).json({ error: 'Only the Boss can move orders' });
-  }
-  next();
-}
+// canMoveOrders lived here and gated adding/removing lines and deleting attachments.
+// It is now the 'order.edit_lines' capability, so the rule has a name and a switch.
 
-module.exports = { authenticate, authorize, canMoveOrders };
+module.exports = { authenticate, authorize };

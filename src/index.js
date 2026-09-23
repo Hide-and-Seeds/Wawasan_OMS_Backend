@@ -49,6 +49,7 @@ app.use('/api/remarks',       require('./routes/remarks'));
 app.use('/api/reports',       require('./routes/reports'));
 app.use('/api/delivery',      require('./routes/delivery'));
 app.use('/api/settings',      require('./routes/settings'));
+app.use('/api/permissions',   require('./routes/permissions'));
 
 // ─── Health check ───
 app.get('/api/health', (req, res) => {

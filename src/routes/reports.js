@@ -2,21 +2,18 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../utils/db');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
+const { requireCap } = require('../lib/capabilities');
 const asyncHandler = require('../utils/asyncHandler');
 
-// Back-office Admin (deputy) reads every report (read-only), same as Boss — Admin
-// already sees customer names on the Dashboard, so Reports exposes nothing extra.
-const ADMIN_ROLES = ['super_admin', 'admin'];
-const DASHBOARD_ROLES = ['super_admin', 'admin'];
-// Production Lead (floor supervisor) may see the name-free reports: production,
-// packing, efficiency, and the per-person staff / person-in-charge tables. Admin
-// (deputy) is included here too so it can read every report.
-const PROD_REPORT_ROLES = ['super_admin', 'production_lead', 'admin'];
-const DELIVERY_REPORT_ROLES = ['super_admin', 'admin'];
+// The four role lists that used to live here are now three capabilities, defaulting to
+// exactly who they used to allow: report.production (the name-free floor reports, which
+// the Production Head reads), report.business (orders, mistakes, trend — these carry
+// customer names) and report.delivery. The dashboard and the audit trail have their own.
+// Defaults and the panel that edits them are in lib/capabilities.js.
 
 // GET /api/reports/dashboard — boss overview
-router.get('/dashboard', authenticate, authorize(...DASHBOARD_ROLES), asyncHandler(async (req, res) => {
+router.get('/dashboard', authenticate, requireCap('page.dashboard'), asyncHandler(async (req, res) => {
   const stageCounts = (await query(`
     SELECT stage, COUNT(*)::int AS count FROM orders
     WHERE stage NOT IN ('delivered','cancelled')
@@ -62,7 +59,7 @@ router.get('/dashboard', authenticate, authorize(...DASHBOARD_ROLES), asyncHandl
 }));
 
 // GET /api/reports/production — production performance
-router.get('/production', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/production', authenticate, requireCap('report.production'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
 
   let dateFilter = '';
@@ -149,7 +146,7 @@ router.get('/production', authenticate, authorize(...PROD_REPORT_ROLES), asyncHa
 }));
 
 // GET /api/reports/packing — packing performance
-router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/packing', authenticate, requireCap('report.production'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
 
   const params = [];
@@ -201,7 +198,7 @@ router.get('/packing', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandl
 }));
 
 // GET /api/reports/delivery — delivery performance
-router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/delivery', authenticate, requireCap('report.delivery'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
 
   const params = [];
@@ -273,7 +270,7 @@ router.get('/delivery', authenticate, authorize(...DELIVERY_REPORT_ROLES), async
 
 // GET /api/reports/delivery/carrier — one driver's deliveries detail (the click-through
 // from the By-carrier table): key = deliverer/user id.
-router.get('/delivery/carrier', authenticate, authorize(...DELIVERY_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/delivery/carrier', authenticate, requireCap('report.delivery'), asyncHandler(async (req, res) => {
   const { kind, key, period = 'weekly', from, to } = req.query;
   if (!key) return res.status(400).json({ error: 'key required' });
 
@@ -311,7 +308,7 @@ router.get('/delivery/carrier', authenticate, authorize(...DELIVERY_REPORT_ROLES
 
 // GET /api/reports/orders — per-order breakdown: progress, days-in-stage, cycle time,
 // per-stage durations and per-SKU status counts. Boss/Ops only (shows customer names).
-router.get('/orders', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/orders', authenticate, requireCap('report.business'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to, stage } = req.query;
 
   const where = ["o.stage <> 'cancelled'"];
@@ -409,7 +406,7 @@ const BACKWARD_PAIRS = `(st.from_stage, st.to_stage) IN
 
 // GET /api/reports/staff — per-person productivity: stage completions, items
 // marked done, and reworks, in the chosen period. Boss/Ops + Production Lead (no customer names).
-router.get('/staff', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/staff', authenticate, requireCap('report.production'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const params = [];
   // Matching date windows for stage_transitions (created_at) and order_items (made_at).
@@ -470,7 +467,7 @@ router.get('/staff', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler
 // reliability, each benchmarked against the team average, plus a recent-activity
 // feed. Same audience as /staff (Boss/Ops/Lead); a Production Lead may only open
 // someone on the make+pack team. All numbers come from existing tables — no money.
-router.get('/staff/:id', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/staff/:id', authenticate, requireCap('report.production'), asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { period = 'weekly', from, to } = req.query;
 
@@ -595,7 +592,7 @@ router.get('/staff/:id', authenticate, authorize(...PROD_REPORT_ROLES), asyncHan
 
 // GET /api/reports/pic — per-person-in-charge view: current open workload
 // (active / overdue / on-hold, live) plus orders completed in the period. Boss/Ops + Production Lead (no customer names).
-router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/pic', authenticate, requireCap('report.production'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const params = [];
   let stF;
@@ -657,7 +654,7 @@ router.get('/pic', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(a
 // GET /api/reports/efficiency — flow health: end-to-end cycle time, on-time rate,
 // the bottleneck stage (longest avg dwell) and aging WIP (oldest open orders).
 // Boss/Ops only (spans delivery). Invoice numbers only — no customer names.
-router.get('/efficiency', authenticate, authorize(...PROD_REPORT_ROLES), asyncHandler(async (req, res) => {
+router.get('/efficiency', authenticate, requireCap('report.production'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const win = (col) => {
     if (from && to) return `AND ${col} BETWEEN $1 AND $2`;
@@ -722,7 +719,7 @@ router.get('/efficiency', authenticate, authorize(...PROD_REPORT_ROLES), asyncHa
 // GET /api/reports/mistakes — error & rework lens: amendments, late / failed
 // deliveries, cancellations, holds and waiting-stock — all from existing tables.
 // Boss/Ops only. The thing nothing aggregated before. No money, no customer names.
-router.get('/mistakes', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/mistakes', authenticate, requireCap('report.business'), asyncHandler(async (req, res) => {
   const { period = 'weekly', from, to } = req.query;
   const win = (col) => {
     if (from && to) return `AND ${col} BETWEEN $1 AND $2`;
@@ -804,7 +801,7 @@ router.get('/mistakes', authenticate, authorize(...ADMIN_ROLES), asyncHandler(as
 }));
 
 // GET /api/reports/audit — audit trail (admin only)
-router.get('/audit', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
+router.get('/audit', authenticate, requireCap('page.audit'), asyncHandler(async (req, res) => {
   const { user_id, action, from, to, page = 1, limit = 50 } = req.query;
   const offset = (parseInt(page) - 1) * parseInt(limit);
 
@@ -1014,7 +1011,7 @@ router.get('/scorecard', authenticate, asyncHandler(async (req, res) => {
 // on-time %, rework % and avg cycle (days), one row per month for the last N
 // months (empty months included). The "are we getting better or worse" view for
 // the monthly review. All from existing fields — no money. Boss/Ops only.
-router.get('/trend', authenticate, authorize(...ADMIN_ROLES), asyncHandler(async (req, res) => {
+router.get('/trend', authenticate, requireCap('report.business'), asyncHandler(async (req, res) => {
   let n = parseInt(req.query.months, 10);
   if (!Number.isFinite(n) || n < 3) n = 6;
   if (n > 12) n = 12;
