@@ -3,7 +3,8 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { query } = require('../utils/db');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
+const { requireCap } = require('../lib/capabilities');
 const asyncHandler = require('../utils/asyncHandler');
 
 // GET /api/settings — all settings as a key→value object
@@ -15,7 +16,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // PUT /api/settings — upsert a batch of settings (admin)
-router.put('/', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
+router.put('/', authenticate, requireCap('settings.write'), asyncHandler(async (req, res) => {
   const settings = req.body.settings || {};
   for (const [key, value] of Object.entries(settings)) {
     await query(
@@ -36,7 +37,7 @@ router.get('/holidays', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // POST /api/settings/holidays (admin)
-router.post('/holidays', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
+router.post('/holidays', authenticate, requireCap('settings.write'), asyncHandler(async (req, res) => {
   const { date, name } = req.body;
   if (!date || !name) return res.status(400).json({ error: 'date and name are required' });
   const id = uuidv4();
@@ -45,7 +46,7 @@ router.post('/holidays', authenticate, authorize('super_admin', 'admin'), asyncH
 }));
 
 // DELETE /api/settings/holidays/:id (admin)
-router.delete('/holidays/:id', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
+router.delete('/holidays/:id', authenticate, requireCap('settings.write'), asyncHandler(async (req, res) => {
   await query('DELETE FROM holidays WHERE id = $1', [req.params.id]);
   res.json({ message: 'Holiday removed' });
 }));
@@ -53,7 +54,7 @@ router.delete('/holidays/:id', authenticate, authorize('super_admin', 'admin'), 
 // POST /api/settings/holidays/bulk (admin) — import many at once from a CSV/Excel
 // upload (parsed client-side to {date,name}). Skips dates that already exist, so
 // re-importing the same file is safe.
-router.post('/holidays/bulk', authenticate, authorize('super_admin', 'admin'), asyncHandler(async (req, res) => {
+router.post('/holidays/bulk', authenticate, requireCap('settings.write'), asyncHandler(async (req, res) => {
   const list = Array.isArray(req.body.holidays) ? req.body.holidays : [];
   let inserted = 0, skipped = 0;
   for (const h of list) {

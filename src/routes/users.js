@@ -4,17 +4,17 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { query } = require('../utils/db');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
+const { requireCap } = require('../lib/capabilities');
 const asyncHandler = require('../utils/asyncHandler');
 
-// Reading the staff list (PIC picker + workload) and managing accounts are both
-// Boss + Office Admin now — the Ops viewer tier was retired in the role reshuffle.
-const USER_VIEWERS = ['super_admin', 'admin'];
-// Create / reset password / enable-disable / delete — Boss + Office Admin only.
-const USER_MANAGERS = ['super_admin', 'admin'];
+// Seeing the staff list (PIC picker + workload) is page.users; creating accounts,
+// setting passwords, changing roles and disabling accounts is users.manage. The
+// Boss-only rule further down — only a Boss may touch a Boss account — is not a
+// capability and is not editable.
 
 // GET /api/users — staff list (viewers: managers + Ops for the PIC picker)
-router.get('/', authenticate, authorize(...USER_VIEWERS), asyncHandler(async (req, res) => {
+router.get('/', authenticate, requireCap('page.users'), asyncHandler(async (req, res) => {
   const users = (await query(`
     SELECT id, name, email, role, avatar_color, is_active, created_at
     FROM users ORDER BY name ASC
@@ -23,7 +23,7 @@ router.get('/', authenticate, authorize(...USER_VIEWERS), asyncHandler(async (re
 }));
 
 // GET /api/users/workload
-router.get('/workload', authenticate, authorize(...USER_VIEWERS), asyncHandler(async (req, res) => {
+router.get('/workload', authenticate, requireCap('page.users'), asyncHandler(async (req, res) => {
   const workload = (await query(`
     SELECT u.id, u.name, u.avatar_color, u.role,
       COUNT(o.id)::int AS active_orders
@@ -37,7 +37,7 @@ router.get('/workload', authenticate, authorize(...USER_VIEWERS), asyncHandler(a
 }));
 
 // POST /api/users — create user (Admin only)
-router.post('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+router.post('/', authenticate, requireCap('users.manage'), asyncHandler(async (req, res) => {
   const { name, email, role, password, avatar_color } = req.body;
   if (!name || !email || !role || !password) {
     return res.status(400).json({ error: 'name, email, role, password are required' });
@@ -60,7 +60,7 @@ router.post('/', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (
 }));
 
 // PATCH /api/users/:id — update / reset password / enable-disable
-router.patch('/:id', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+router.patch('/:id', authenticate, requireCap('users.manage'), asyncHandler(async (req, res) => {
   const target = (await query('SELECT id, role FROM users WHERE id = $1', [req.params.id])).rows[0];
   if (!target) return res.status(404).json({ error: 'User not found' });
 
@@ -91,7 +91,7 @@ router.patch('/:id', authenticate, authorize(...USER_MANAGERS), asyncHandler(asy
 // DELETE /api/users/:id — permanently remove a disabled account (managers).
 // Refuses on self, on a Super Admin (unless you are one), on an active account,
 // or when other rows still reference the user (FK) — those stay disabled.
-router.delete('/:id', authenticate, authorize(...USER_MANAGERS), asyncHandler(async (req, res) => {
+router.delete('/:id', authenticate, requireCap('users.manage'), asyncHandler(async (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
   const target = (await query('SELECT id, role, is_active FROM users WHERE id = $1', [req.params.id])).rows[0];
   if (!target) return res.status(404).json({ error: 'User not found' });

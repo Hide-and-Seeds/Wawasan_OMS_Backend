@@ -3,17 +3,13 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { query, withTransaction } = require('../utils/db');
-const { authenticate, authorize } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
+const { requireCap } = require('../lib/capabilities');
 const asyncHandler = require('../utils/asyncHandler');
 
-// The lead, owners and the back-office Admin may READ the weekly remarks.
-const READ_ROLES = ['super_admin', 'production_lead', 'admin'];
-// The Production Head (Reenee, production_lead) and the Admin (Misha) co-own the weekly
-// remark and both may WRITE/edit it, so production arrangements stay aligned both ways.
-// The Boss owns the monthly summary and, since 2026-09-23, may write the weekly one too:
-// the owners asked for full access and this was the only capability in the system that
-// excluded them. They could already read it, which made the missing editor look broken.
-const WRITE_ROLES = ['super_admin', 'production_lead', 'admin'];
+// Reading is page.remarks; writing the shared weekly note is remarks.write; the
+// month-end summary is remarks.monthly. Defaults live in lib/capabilities.js and
+// match what these role lists used to allow.
 
 // Archive tables (column mirrors). The pg_cron jobs move old remarks here
 // (weekly: past weeks; quarterly: months > 3mo) so the live tables stay lean but
@@ -46,7 +42,7 @@ async function notifyRemarkAudience(q, actorId, title, message) {
 }
 
 // GET /api/remarks — list all remarks (live + archived)
-router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
+router.get('/', authenticate, requireCap('page.remarks'), asyncHandler(async (req, res) => {
   await ensureArchives();
   const remarks = (await query(`
     SELECT r.*, u.name AS author_name, e.name AS editor_name FROM (
@@ -61,7 +57,7 @@ router.get('/', authenticate, authorize(...READ_ROLES), asyncHandler(async (req,
 }));
 
 // GET /api/remarks/current — current week (Monday-anchored)
-router.get('/current', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
+router.get('/current', authenticate, requireCap('page.remarks'), asyncHandler(async (req, res) => {
   const remark = (await query(`
     SELECT r.*, u.name AS author_name, e.name AS editor_name FROM production_remarks r
     JOIN users u ON r.author_id = u.id
@@ -73,7 +69,7 @@ router.get('/current', authenticate, authorize(...READ_ROLES), asyncHandler(asyn
 }));
 
 // POST /api/remarks
-router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (req, res) => {
+router.post('/', authenticate, requireCap('remarks.write'), asyncHandler(async (req, res) => {
   const { content, week_start } = req.body;
   if (!content) return res.status(400).json({ error: 'Content is required' });
 
@@ -104,11 +100,11 @@ router.post('/', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (re
 }));
 
 // PATCH /api/remarks/:id
-router.patch('/:id', authenticate, authorize(...WRITE_ROLES), asyncHandler(async (req, res) => {
+router.patch('/:id', authenticate, requireCap('remarks.write'), asyncHandler(async (req, res) => {
   const remark = (await query('SELECT * FROM production_remarks WHERE id = $1', [req.params.id])).rows[0];
   if (!remark) return res.status(404).json({ error: 'Not found' });
-  // Weekly remarks are a shared doc co-owned by the lead + admin (both in WRITE_ROLES),
-  // so any writer may edit regardless of who first created the row.
+  // Weekly remarks are a shared doc: anyone with remarks.write may edit one regardless
+  // of who first created the row.
   if (!req.body.content || !req.body.content.trim()) return res.status(400).json({ error: 'Content is required' });
 
   const wStart = new Date(remark.week_start).toISOString().slice(0, 10);
@@ -135,7 +131,7 @@ async function ensureMonthly() {
 }
 
 // GET /api/remarks/monthly — list monthly summaries (live + archived)
-router.get('/monthly', authenticate, authorize(...READ_ROLES), asyncHandler(async (req, res) => {
+router.get('/monthly', authenticate, requireCap('page.remarks'), asyncHandler(async (req, res) => {
   await ensureArchives();
   const rows = (await query(`
     SELECT m.*, u.name AS author_name FROM (
@@ -150,7 +146,7 @@ router.get('/monthly', authenticate, authorize(...READ_ROLES), asyncHandler(asyn
 
 // POST /api/remarks/monthly — write / overwrite a month's summary (Boss only).
 // Upserts on month_start so editing the current month is just another POST.
-router.post('/monthly', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+router.post('/monthly', authenticate, requireCap('remarks.monthly'), asyncHandler(async (req, res) => {
   await ensureMonthly();
   const { content, month_start } = req.body;
   if (!content || !content.trim()) return res.status(400).json({ error: 'Content is required' });

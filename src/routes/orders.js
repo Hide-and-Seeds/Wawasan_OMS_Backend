@@ -4,7 +4,8 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
-const { authenticate, authorize, canMoveOrders } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
+const { requireCap, assertCap, can } = require('../lib/capabilities');
 const asyncHandler = require('../utils/asyncHandler');
 const { uploadBuffer, publicUrl, removeObject } = require('../lib/supabaseClient');
 const { parseInvoicesFromCsv } = require('../lib/sqlAccountCsv');
@@ -371,7 +372,7 @@ async function nextFreeInvoice(code) {
 // the next free number) instead of the user hitting a blind 409 on submit.
 // super_admin only — mirrors manual create. Registered before /:id so the literal
 // path wins.
-router.get('/check-invoice', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
+router.get('/check-invoice', authenticate, requireCap('order.import'), asyncHandler(async (req, res) => {
   const code = String(req.query.code || '').trim();
   if (!code) return res.json({ code: '', exists: false });
   const hit = (await query('SELECT id, customer_name, stage FROM orders WHERE invoice_number = $1', [code])).rows[0];
@@ -430,10 +431,7 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/orders — create order
 router.post('/', authenticate, asyncHandler(async (req, res) => {
-  const allowed = ['super_admin'];
-  if (!allowed.includes(req.user.role)) {
-    return res.status(403).json({ error: 'Insufficient permissions' });
-  }
+  if (!await assertCap(req, res, 'order.create')) return;
   await ensureImportance();
   await ensureOrderFlags();
 
@@ -583,7 +581,7 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
 // PREVIEW (creates nothing); commit=true creates the new ones. Parsing and the
 // duplicate check both run here in the cloud — the client only uploads the file.
 // super_admin only, mirrors manual create / the SQL Account webhook.
-router.post('/import', authenticate, authorize('super_admin'), uploadCsvSingle('file'), asyncHandler(async (req, res) => {
+router.post('/import', authenticate, requireCap('order.import'), uploadCsvSingle('file'), asyncHandler(async (req, res) => {
   await ensureImportance();
   await ensureOrderFlags();
 
@@ -725,7 +723,7 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
   }
 
   // Managers (Boss + back-office Admin) move freely; stage staff may only advance their own stage forward one step.
-  if (!['super_admin', 'admin'].includes(req.user.role)) {
+  if (!await can(req.user.role, 'order.move_free')) {
     if (order.on_hold) return res.status(403).json({ error: 'Order is on hold' });
     const owners = STAGE_OWNERS[fromStage] || [];
     const forwardOk = owners.includes(req.user.role) && to_stage === FORWARD_STAGE[fromStage];
@@ -847,11 +845,9 @@ router.post('/:id/move', authenticate, asyncHandler(async (req, res) => {
 
 // POST /api/orders/:id/assign-pic
 router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
-  // Boss, back-office Admin (deputy), or the Production Head may set the PIC. (Not
-  // canMoveOrders — that gate also guards order delete, which they must NOT have.)
-  if (!['super_admin', 'admin', 'production_lead'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Insufficient permissions' });
-  }
+  // Routing an order — setting who owns it — is its own capability, separate from
+  // the one that lets a role add or remove the lines themselves.
+  if (!await assertCap(req, res, 'order.route')) return;
   // track selects which owner to set: production (pic_id, default) or packing
   // (packing_pic_id). Whitelisted to a real column name so it's safe to interpolate.
   const { pic_id, track = 'production' } = req.body;
@@ -891,7 +887,7 @@ router.post('/:id/assign-pic', authenticate, asyncHandler(async (req, res) => {
 // Shared: the chosen order persists for everyone who views the board. Drives the
 // Production column today. Boss/Admin/Ops/Production Lead only. Single segment so it
 // can't be captured by the POST /:id/* routes.
-router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'production_lead'), asyncHandler(async (req, res) => {
+router.post('/reorder', authenticate, requireCap('order.route'), asyncHandler(async (req, res) => {
   await ensureSortOrder();
   await ensureImportance();
   const { stage, ordered_ids, set_importance } = req.body || {};
@@ -923,7 +919,7 @@ router.post('/reorder', authenticate, authorize('super_admin', 'admin', 'product
 
 // PATCH /api/orders/:id/flags — toggle hold / waiting-stock overlay flags.
 // admin (deputy) may hold (soft, reversible); cancel + stage moves stay Boss-only.
-router.patch('/:id/flags', authenticate, authorize('super_admin', 'production_lead', 'admin'), asyncHandler(async (req, res) => {
+router.patch('/:id/flags', authenticate, requireCap('order.route'), asyncHandler(async (req, res) => {
   await ensureOrderFlags();
   const order = (await query('SELECT * FROM orders WHERE id = $1', [req.params.id])).rows[0];
   if (!order) return res.status(404).json({ error: 'Order not found' });
@@ -995,11 +991,11 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   const ord = (await query('SELECT id, invoice_number, stage, pic_id FROM orders WHERE id = $1', [req.params.id])).rows[0];
 
   const isManager = ['super_admin', 'admin'].includes(req.user.role);
-  const canMark = isManager || ['production_lead', 'production_staff', 'packing_staff'].includes(req.user.role);
+  const canMark = await can(req.user.role, 'item.mark');
   // Boss + back-office Admin may amend a placed line (correct a wrong STK / qty / unit).
   // Adding or removing whole lines stays locked (POST/DELETE below) — those must match
   // the source invoice in SQL Account.
-  const canAmend = ['super_admin', 'admin'].includes(req.user.role);
+  const canAmend = await can(req.user.role, 'order.amend_line');
   const b = req.body || {};
   const editingFields = ['sku', 'name', 'unit', 'quantity'].some((f) => b[f] !== undefined);
   // Items are tracked by status; a caller may instead send `qty_done`, the number of
@@ -1144,13 +1140,13 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
 }));
 
 // POST /api/orders/:id/items — add a line item (Ops/Admin)
-router.post('/:id/items', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+router.post('/:id/items', authenticate, requireCap('order.edit_lines'), asyncHandler(async (req, res) => {
   // Line items are locked after an order is placed — they must match the source invoice.
   return res.status(403).json({ error: 'Line items are locked once an order is placed and cannot be added. Add items in SQL Account.' });
 }));
 
 // DELETE /api/orders/:id/items/:itemId — remove a line item (Ops/Admin)
-router.delete('/:id/items/:itemId', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+router.delete('/:id/items/:itemId', authenticate, requireCap('order.edit_lines'), asyncHandler(async (req, res) => {
   // Line items are locked after an order is placed — they must match the source invoice.
   return res.status(403).json({ error: 'Line items are locked once an order is placed and cannot be removed. Remove items in SQL Account.' });
 }));
@@ -1190,7 +1186,7 @@ router.post('/:id/attachments', authenticate, uploadSingle('file'), asyncHandler
 }));
 
 // DELETE /api/orders/:id/attachments/:attId — remove an attachment + its file (Ops/Admin)
-router.delete('/:id/attachments/:attId', authenticate, canMoveOrders, asyncHandler(async (req, res) => {
+router.delete('/:id/attachments/:attId', authenticate, requireCap('order.edit_lines'), asyncHandler(async (req, res) => {
   const att = (await query('SELECT * FROM order_attachments WHERE id = $1 AND order_id = $2', [req.params.attId, req.params.id])).rows[0];
   if (!att) return res.status(404).json({ error: 'Attachment not found' });
   try { await removeObject(att.filename); } catch (e) { /* best-effort: still remove the record */ }

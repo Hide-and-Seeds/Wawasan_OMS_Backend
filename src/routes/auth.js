@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const { query } = require('../utils/db');
 const { authenticate } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
+const { capsFor } = require('../lib/capabilities');
 
 // POST /api/auth/login
 router.post('/login', asyncHandler(async (req, res) => {
@@ -49,7 +50,10 @@ router.post('/login', asyncHandler(async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      avatar_color: user.avatar_color
+      avatar_color: user.avatar_color,
+      // Same shape /me returns: the app gates on these, and signing in has to hand
+      // them over or the first screen after login would have nothing to gate on.
+      caps: await capsFor(user.role)
     }
   });
 }));
@@ -65,9 +69,12 @@ router.post('/logout', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // GET /api/auth/me
-router.get('/me', authenticate, (req, res) => {
-  res.json({ user: req.user });
-});
+// The frontend gates on capabilities, not on the role name, so it needs the resolved
+// set for whoever is logged in. It rides along with the user the app already loads at
+// boot rather than costing a second request.
+router.get('/me', authenticate, asyncHandler(async (req, res) => {
+  res.json({ user: { ...req.user, caps: await capsFor(req.user.role) } });
+}));
 
 // POST /api/auth/refresh — issue a fresh token for the current session.
 // The Floor Display wall view calls this with { kiosk: true } so the always-on
