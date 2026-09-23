@@ -380,6 +380,134 @@ router.get('/check-invoice', authenticate, requireCap('order.import'), asyncHand
   res.json({ code, exists: true, id: hit.id, customer_name: hit.customer_name, stage: hit.stage, suggestion: await nextFreeInvoice(code) });
 }));
 
+// ─── Archiving the whole board ─────────────────────────────────────────────
+// The owners asked to be able to clear the board themselves — for going live after
+// testing, mostly. Orders are never hard-deleted here (that policy predates this and
+// is why DELETE /:id was removed in the 2026-06-10 cleanup), so "clear" means copy
+// every row into a mirror table first and take it off the live one second. Nothing is
+// lost; the board simply starts empty.
+//
+// Registered before /:id so the literal paths win.
+
+const ARCHIVED_TABLES = ['orders', 'order_items', 'order_attachments', 'stage_transitions', 'deliveries'];
+
+let _archiveReady = false;
+async function ensureOrderArchive() {
+  if (_archiveReady) return;
+  for (const t of ARCHIVED_TABLES) {
+    // LIKE copies the columns but not the keys, which is what an archive wants: no
+    // unique invoice_number (the same number can be archived twice over the years)
+    // and no foreign key back to a row that may since have gone.
+    await query(`CREATE TABLE IF NOT EXISTS ${t}_archive (LIKE ${t})`);
+    await query(`ALTER TABLE ${t}_archive ADD COLUMN IF NOT EXISTS purge_id uuid`);
+    await query(`ALTER TABLE ${t}_archive ADD COLUMN IF NOT EXISTS archived_at timestamptz NOT NULL DEFAULT now()`);
+  }
+  await query('ALTER TABLE orders_archive ADD COLUMN IF NOT EXISTS archived_by uuid');
+  _archiveReady = true;
+}
+
+// The live tables gain columns over time through the ensure* migrations above. An
+// archive built from an older shape would then be missing them and a SELECT * copy
+// would fail on the column count, so bring the mirror up to date first, using the
+// exact declared type rather than information_schema's lossy data_type.
+async function syncArchiveColumns(q, table) {
+  const missing = (await q(`
+    SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS coltype
+    FROM pg_attribute a
+    WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
+      AND a.attname NOT IN (
+        SELECT b.attname FROM pg_attribute b
+        WHERE b.attrelid = $2::regclass AND b.attnum > 0 AND NOT b.attisdropped
+      )
+  `, [table, `${table}_archive`])).rows;
+  for (const c of missing) {
+    await q(`ALTER TABLE ${table}_archive ADD COLUMN "${c.name}" ${c.coltype}`);
+  }
+  return missing.map((c) => c.name);
+}
+
+// Copy one table's rows into its mirror. Columns are listed explicitly so a mismatch
+// is impossible even if the two shapes drift again later.
+async function copyToArchive(q, table, purgeId, userId) {
+  await syncArchiveColumns(q, table);
+  const cols = (await q(`
+    SELECT a.attname AS name FROM pg_attribute a
+    WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
+    ORDER BY a.attnum
+  `, [table])).rows.map((r) => `"${r.name}"`);
+  const extraCols = table === 'orders' ? ', purge_id, archived_by' : ', purge_id';
+  const extraVals = table === 'orders' ? ', $1, $2' : ', $1';
+  const params = table === 'orders' ? [purgeId, userId] : [purgeId];
+  const { rowCount } = await q(
+    `INSERT INTO ${table}_archive (${cols.join(', ')}${extraCols})
+     SELECT ${cols.join(', ')}${extraVals} FROM ${table}`,
+    params
+  );
+  return rowCount;
+}
+
+async function boardCensus() {
+  const stages = (await query(`SELECT stage, COUNT(*)::int AS n FROM orders GROUP BY stage`)).rows;
+  const one = async (sql) => (await query(sql)).rows[0].n;
+  return {
+    orders: stages.reduce((a, r) => a + r.n, 0),
+    by_stage: stages.reduce((a, r) => { a[r.stage] = r.n; return a; }, {}),
+    items: await one('SELECT COUNT(*)::int AS n FROM order_items'),
+    deliveries: await one('SELECT COUNT(*)::int AS n FROM deliveries'),
+    attachments: await one('SELECT COUNT(*)::int AS n FROM order_attachments'),
+    archived_already: await one(`SELECT COALESCE((SELECT COUNT(*)::int FROM orders_archive), 0) AS n`),
+  };
+}
+
+// GET /api/orders/purge/preview — what clearing the board would move, before doing it.
+router.get('/purge/preview', authenticate, requireCap('order.purge'), asyncHandler(async (req, res) => {
+  await ensureOrderArchive();
+  res.json(await boardCensus());
+}));
+
+// POST /api/orders/purge — archive everything, leave the board empty.
+// Body: { confirm: <the number of orders the caller was shown> }
+router.post('/purge', authenticate, requireCap('order.purge'), asyncHandler(async (req, res) => {
+  await ensureOrderArchive();
+  const census = await boardCensus();
+
+  if (census.orders === 0) return res.status(400).json({ error: 'The board is already empty.' });
+
+  // The caller types the count they were shown. If the board moved between the preview
+  // and the button — someone keyed an invoice in the next room — the numbers disagree
+  // and nothing happens, rather than quietly taking more than they agreed to.
+  const confirm = typeof req.body?.confirm === 'number' ? req.body.confirm : NaN;
+  if (confirm !== census.orders) {
+    return res.status(409).json({
+      error: `The board holds ${census.orders} order${census.orders === 1 ? '' : 's'} now, not ${Number.isFinite(confirm) ? confirm : 'the number given'}. Nothing was changed — check the figure and try again.`,
+      orders: census.orders,
+    });
+  }
+
+  const purgeId = uuidv4();
+  const moved = {};
+  await withTransaction(async (q) => {
+    // Children first: once the orders row goes, its cascades take these with it.
+    for (const t of ['order_items', 'order_attachments', 'stage_transitions', 'deliveries', 'orders']) {
+      moved[t] = await copyToArchive(q, t, purgeId, req.user.id);
+    }
+    // Bell entries would be left pointing at an order nobody can open. The audit log
+    // is deliberately NOT touched: its order_id goes null by itself and the record of
+    // who did what stays.
+    await q('DELETE FROM notifications WHERE order_id IS NOT NULL');
+    await q('DELETE FROM orders');
+    await q(
+      `INSERT INTO activity_log (id, user_id, action, details, ip_address)
+       VALUES ($1, $2, 'board_archived', $3, $4)`,
+      [uuidv4(), req.user.id,
+        `Archived the whole board: ${moved.orders} orders, ${moved.order_items} lines, ${moved.deliveries} deliveries (batch ${purgeId})`,
+        req.ip || null]
+    );
+  });
+
+  res.json({ message: 'Board archived', purge_id: purgeId, moved });
+}));
+
 // GET /api/orders/:id
 router.get('/:id', authenticate, asyncHandler(async (req, res) => {
   await ensureImportance();

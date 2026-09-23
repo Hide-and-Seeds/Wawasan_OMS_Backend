@@ -144,6 +144,13 @@ const CAPABILITIES = [
     help: 'Mark a line not started / making / done and count cartons. A department can only ever tick its own track.',
     roles: ['admin', 'production_lead', 'production_staff', 'packing_staff'],
   },
+  {
+    // Nobody by default, not even the Admin. The Boss has it because the Boss has
+    // everything; anyone else has to be given it deliberately.
+    id: 'order.purge', group: 'Orders', label: 'Archive the whole board',
+    help: 'Move every order into the archive tables and start the board empty. Nothing is destroyed — the rows keep their invoice numbers, lines and history, and can be read back or restored. Intended for a fresh start, such as going live after testing.',
+    roles: [],
+  },
 
   // ── Delivery ──────────────────────────────────────────────────────────────
   {
