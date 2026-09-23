@@ -10,8 +10,10 @@ const asyncHandler = require('../utils/asyncHandler');
 const READ_ROLES = ['super_admin', 'production_lead', 'admin'];
 // The Production Head (Reenee, production_lead) and the Admin (Misha) co-own the weekly
 // remark and both may WRITE/edit it, so production arrangements stay aligned both ways.
-// The Boss writes the monthly summary.
-const WRITE_ROLES = ['production_lead', 'admin'];
+// The Boss owns the monthly summary and, since 2026-09-23, may write the weekly one too:
+// the owners asked for full access and this was the only capability in the system that
+// excluded them. They could already read it, which made the missing editor look broken.
+const WRITE_ROLES = ['super_admin', 'production_lead', 'admin'];
 
 // Archive tables (column mirrors). The pg_cron jobs move old remarks here
 // (weekly: past weeks; quarterly: months > 3mo) so the live tables stay lean but
