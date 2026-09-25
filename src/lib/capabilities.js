@@ -52,11 +52,12 @@ const CAPABILITIES = [
     help: 'The kanban board of live orders.',
     roles: ['admin', 'production_lead', 'production_staff', 'packing_staff'],
   },
-  {
-    id: 'page.import', group: 'Sections', label: 'Import Invoices',
-    help: 'The SQL Account CSV import page.',
-    roles: [],
-  },
+  // page.import is gone (2026-09-25). The Import Invoices tab was taken out of the
+  // frontend nav because the owners do not work in SQL Account, so the capability
+  // governed a page nobody can open — and a switch that changes nothing is worse than
+  // no switch. The endpoint behind it keeps its own guard, order.import, below. Any
+  // stored override row for page.import is ignored on read, so nothing needs cleaning
+  // out of role_permissions.
   {
     id: 'page.dashboard', group: 'Sections', label: 'Dashboard',
     help: 'Operations overview. Lists customer names.',
@@ -111,11 +112,12 @@ const CAPABILITIES = [
     help: 'Key an invoice in by hand.',
     roles: [],
   },
-  {
-    id: 'order.import', group: 'Orders', label: 'Import invoices from CSV',
-    help: 'Turn a SQL Account export into orders.',
-    roles: [],
-  },
+  // order.import went the same way as page.import (2026-09-25). A row in the owners'
+  // panel reading "Import invoices from CSV — turn a SQL Account export into orders" is
+  // the same jargon the tab was removed for, in the one screen they will actually use.
+  // POST /orders/import and GET /orders/check-invoice are back to a plain Boss guard,
+  // which is what they had before capabilities existed. If the import ever gets a real
+  // screen again, give it a capability again.
   {
     id: 'order.move_free', group: 'Orders', label: 'Move or cancel an order',
     help: 'Send an order to any stage, backwards included, or cancel it. Without this a role can still push its own stage forward when it is finished.',

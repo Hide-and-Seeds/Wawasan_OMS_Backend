@@ -4,7 +4,9 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
-const { authenticate } = require('../middleware/auth');
+// authorize() is here only for the CSV import pair, which has no screen in the app and
+// is therefore not something the owners configure — see the note in lib/capabilities.js.
+const { authenticate, authorize } = require('../middleware/auth');
 const { requireCap, assertCap, can } = require('../lib/capabilities');
 const asyncHandler = require('../utils/asyncHandler');
 const { uploadBuffer, publicUrl, removeObject } = require('../lib/supabaseClient');
@@ -372,7 +374,7 @@ async function nextFreeInvoice(code) {
 // the next free number) instead of the user hitting a blind 409 on submit.
 // super_admin only — mirrors manual create. Registered before /:id so the literal
 // path wins.
-router.get('/check-invoice', authenticate, requireCap('order.import'), asyncHandler(async (req, res) => {
+router.get('/check-invoice', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
   const code = String(req.query.code || '').trim();
   if (!code) return res.json({ code: '', exists: false });
   const hit = (await query('SELECT id, customer_name, stage FROM orders WHERE invoice_number = $1', [code])).rows[0];
@@ -709,7 +711,7 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
 // PREVIEW (creates nothing); commit=true creates the new ones. Parsing and the
 // duplicate check both run here in the cloud — the client only uploads the file.
 // super_admin only, mirrors manual create / the SQL Account webhook.
-router.post('/import', authenticate, requireCap('order.import'), uploadCsvSingle('file'), asyncHandler(async (req, res) => {
+router.post('/import', authenticate, authorize('super_admin'), uploadCsvSingle('file'), asyncHandler(async (req, res) => {
   await ensureImportance();
   await ensureOrderFlags();
 
