@@ -461,15 +461,19 @@ async function boardCensus() {
   };
 }
 
+// Both purge routes are hardcoded to super_admin and are deliberately NOT a capability.
+// A capability defaulting to nobody can still be granted; this must not be grantable at
+// all. Same rule as the permissions panel — see lib/capabilities.js.
+
 // GET /api/orders/purge/preview — what clearing the board would move, before doing it.
-router.get('/purge/preview', authenticate, requireCap('order.purge'), asyncHandler(async (req, res) => {
+router.get('/purge/preview', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
   await ensureOrderArchive();
   res.json(await boardCensus());
 }));
 
 // POST /api/orders/purge — archive everything, leave the board empty.
 // Body: { confirm: <the number of orders the caller was shown> }
-router.post('/purge', authenticate, requireCap('order.purge'), asyncHandler(async (req, res) => {
+router.post('/purge', authenticate, authorize('super_admin'), asyncHandler(async (req, res) => {
   await ensureOrderArchive();
   const census = await boardCensus();
 
