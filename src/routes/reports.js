@@ -48,13 +48,27 @@ router.get('/dashboard', authenticate, requireCap('page.dashboard'), asyncHandle
 
   const activeStaff = (await query("SELECT COUNT(*)::int AS count FROM users WHERE is_active = true")).rows[0];
 
+  // When the last invoice arrived by itself. The two feeds that fill this board — the
+  // on-prem bridge and the emailed CSV — both run outside the app, so nothing in here
+  // notices when one stops; on 2026-09-30 a morning's invoices were missing and the
+  // first anyone knew was a person counting. This is the number that makes that
+  // visible. Falls back to the newest order so a fresh deploy reads sensibly before
+  // the first intake row exists.
+  const lastIntake = (await query(`
+    SELECT COALESCE(
+      (SELECT MAX(created_at) FROM activity_log WHERE action = 'intake_received'),
+      (SELECT MAX(created_at) FROM orders)
+    ) AS at
+  `)).rows[0];
+
   res.json({
     stage_counts: stageCounts,
     this_week_orders: thisWeekOrders.count,
     this_month_orders: thisMonthOrders.count,
     upcoming_deliveries: upcomingDeliveries,
     overdue_orders: overdueOrders,
-    active_staff: activeStaff.count
+    active_staff: activeStaff.count,
+    last_intake_at: lastIntake.at
   });
 }));
 
