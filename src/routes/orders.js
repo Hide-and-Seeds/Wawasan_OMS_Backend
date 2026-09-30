@@ -1355,6 +1355,30 @@ async function orderIntakeEnabled() {
   return !(r.rows[0] && String(r.rows[0].value).toLowerCase() === 'false');
 }
 
+// Automated intake can decline an invoice three ways — paused by the kill switch, a
+// marketplace number, or one already on the board — and all three answer 200 so the
+// on-prem relay does not retry-storm. That is right for the relay and wrong for
+// everyone else: on 2026-09-30 a morning's invoices went missing and there was no
+// record anywhere of them having been declined, or of anything having arrived at all.
+//
+// Both outcomes are written to the Audit Trail now. 'intake_received' is what the
+// Dashboard's "last invoice" reads, which is why it is its own row rather than
+// something matched out of the order_created message — that message can change.
+//
+// Nothing in here may throw. A failure to write the log must never cost the invoice.
+async function logIntake(action, details, ipAddress) {
+  try {
+    const sys = (await query("SELECT id FROM users WHERE role = 'super_admin' ORDER BY created_at LIMIT 1")).rows[0];
+    if (!sys) return;
+    await query(
+      'INSERT INTO activity_log (id, user_id, action, details, ip_address) VALUES ($1, $2, $3, $4, $5)',
+      [uuidv4(), sys.id, action, String(details).slice(0, 2000), ipAddress || null]
+    );
+  } catch (err) {
+    console.error('[intake] could not write %s to the audit trail: %s', action, err.message);
+  }
+}
+
 router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   // Validate webhook secret. Fail closed: if the secret isn't configured we must
   // reject, otherwise (undefined === undefined) would let unauthenticated calls through.
@@ -1367,6 +1391,8 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   // 200 so the on-prem relay does not treat it as an error and retry-storm; nothing
   // is recorded while paused.
   if (!(await orderIntakeEnabled())) {
+    await logIntake('intake_skipped',
+      `Order tracking is paused — invoice ${req.body?.invoice_number || '(no number)'} was not recorded`, req.ip);
     return res.status(200).json({ skipped: 'intake_disabled', message: 'Order tracking is paused by the administrator.' });
   }
 
@@ -1386,6 +1412,8 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   // Marketplace (Lazada/Shopee/TikTok) invoices use a DOCNO prefixed 'L' and are handled
   // by a separate commerce team - never import them via SQL Account sync.
   if (/^L/i.test(String(invoice_number))) {
+    await logIntake('intake_skipped',
+      `Invoice ${invoice_number} skipped: marketplace number (starts with L), handled by the commerce team`, req.ip);
     return res.status(200).json({ skipped: 'marketplace', invoice_number });
   }
 
@@ -1395,7 +1423,10 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   const safeImportance = VALID_IMPORTANCE.includes(importance) ? importance : 'standard';
 
   const existing = (await query('SELECT id FROM orders WHERE invoice_number = $1', [invoice_number])).rows[0];
-  if (existing) return res.status(409).json({ error: 'Duplicate invoice', existing_id: existing.id });
+  if (existing) {
+    await logIntake('intake_skipped', `Invoice ${invoice_number} skipped: already on the board`, req.ip);
+    return res.status(409).json({ error: 'Duplicate invoice', existing_id: existing.id });
+  }
 
   const systemUser = (await query("SELECT id FROM users WHERE role = 'super_admin' LIMIT 1")).rows[0];
   if (!systemUser) return res.status(500).json({ error: 'No system user configured' });
@@ -1443,6 +1474,7 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
       message: `${invoice_number} — ${customer_name} landed in Order. Assign a PIC to start production.` });
   });
 
+  await logIntake('intake_received', `Invoice ${invoice_number} received from SQL Account — ${customer_name}`, req.ip);
   res.status(201).json({ id: orderId, invoice_number, stage: initialStage });
 }));
 
@@ -1458,6 +1490,7 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Invalid webhook secret' });
   }
   if (!(await orderIntakeEnabled())) {
+    await logIntake('intake_skipped', 'Order tracking is paused — an emailed CSV was not recorded', req.ip);
     return res.status(200).json({ skipped: 'intake_disabled', message: 'Order tracking is paused by the administrator.' });
   }
   await ensureImportance();
@@ -1485,6 +1518,17 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
   if (!systemUser) return res.status(500).json({ error: 'No system user configured' });
 
   const summary = await importParsedInvoices(invoices, systemUser.id, req.ip);
+  // One line per delivery rather than per invoice: the batch is what arrived, and the
+  // counts say what became of it. Declines are named so a silent drop cannot happen
+  // twice without somebody being able to see it.
+  const declined = [
+    summary.duplicate ? `${summary.duplicate} already on the board` : null,
+    summary.skipped_marketplace ? `${summary.skipped_marketplace} marketplace` : null,
+    summary.failed ? `${summary.failed} failed` : null,
+  ].filter(Boolean).join(', ');
+  await logIntake(summary.created > 0 ? 'intake_received' : 'intake_skipped',
+    `Emailed CSV: ${invoices.length} invoice${invoices.length === 1 ? '' : 's'} received, ${summary.created} created`
+      + (declined ? ` — ${declined}` : ''), req.ip);
   res.status(201).json({ mode: 'commit', total: invoices.length, ...summary });
 }));
 
