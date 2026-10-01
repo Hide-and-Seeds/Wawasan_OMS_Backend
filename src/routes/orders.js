@@ -56,6 +56,11 @@ const STAGE_OWNERS = { production: ['production_staff', 'production_lead'], pack
 // Customer importance tiers — a per-order classification of how important the
 // customer is, separate from `priority` (which flags a rush order). Low → high.
 const VALID_IMPORTANCE = ['standard', 'priority', 'vip'];
+// What an invoice number may look like, for every way an order arrives: 3-40
+// characters, letters/digits and - _ / only. Automated intake declines anything else,
+// so a mangled CSV row cannot become a card (2026-10-01: two did, numbered
+// ",012-2492937,C.O.D.,STK060,...").
+const INVOICE_NUMBER_RE = /^[A-Za-z0-9][A-Za-z0-9/_-]{2,39}$/;
 // Per-SKU completion is tracked by status only (replaces the old made_qty count).
 // A line quantity ceiling. `quantity` is an unbounded numeric in the schema, and both
 // the carton counters and the board's carton aggregates cast to integer, so an
@@ -583,7 +588,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   // SQL Account webhook, and the code must be a clean token — this stops a manual
   // order colliding with (or masquerading as) a real SQL Account invoice.
   const code = String(invoice_number).trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9/_-]{2,39}$/.test(code)) {
+  if (!INVOICE_NUMBER_RE.test(code)) {
     return res.status(400).json({ error: 'Invoice number must be 3–40 characters: letters, digits, and - _ / only.' });
   }
   if (/^SI\d/i.test(code)) {
@@ -649,8 +654,9 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
   const taken = new Set(existing.keys());
   const blank = (v) => v === null || v === undefined || String(v).trim() === '';
   const results = [];
-  let created = 0, duplicate = 0, failed = 0, backfilled = 0, skipped_marketplace = 0, skipped_sales_order = 0;
+  let created = 0, duplicate = 0, failed = 0, backfilled = 0, skipped_marketplace = 0, skipped_sales_order = 0, skipped_invalid = 0;
   for (const inv of invoices) {
+    if (!INVOICE_NUMBER_RE.test(String(inv.invoice_number || ''))) { skipped_invalid++; results.push({ invoice_number: String(inv.invoice_number || '').slice(0, 60), status: 'skipped_invalid' }); continue; }
     // Marketplace invoices (Lazada/Shopee/TikTok) use a DOCNO prefixed 'L' and are
     // handled by a separate commerce team - never import them into the OMS.
     if (/^L/i.test(String(inv.invoice_number || ''))) { skipped_marketplace++; results.push({ invoice_number: inv.invoice_number, status: 'skipped_marketplace' }); continue; }
@@ -710,7 +716,7 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
       else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
     }
   }
-  return { created, duplicate, failed, backfilled, skipped_marketplace, skipped_sales_order, results };
+  return { created, duplicate, failed, backfilled, skipped_marketplace, skipped_sales_order, skipped_invalid, results };
 }
 
 // POST /api/orders/import — bulk-import invoices from a SQL Account CSV export.
@@ -1412,6 +1418,11 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
   if (!invoice_number || !customer_name) {
     return res.status(400).json({ error: 'invoice_number and customer_name are required' });
   }
+  if (!INVOICE_NUMBER_RE.test(String(invoice_number))) {
+    await logIntake('intake_skipped',
+      `Invoice "${String(invoice_number).slice(0, 60)}" skipped: not a valid invoice number`, req.ip);
+    return res.status(200).json({ skipped: 'invalid_number', invoice_number });
+  }
   // Marketplace (Lazada/Shopee/TikTok) invoices use a DOCNO prefixed 'L' and are handled
   // by a separate commerce team - never import them via SQL Account sync.
   if (/^L/i.test(String(invoice_number))) {
@@ -1535,6 +1546,7 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
     summary.duplicate ? `${summary.duplicate} already on the board` : null,
     summary.skipped_marketplace ? `${summary.skipped_marketplace} marketplace` : null,
     summary.skipped_sales_order ? `${summary.skipped_sales_order} sales order` : null,
+    summary.skipped_invalid ? `${summary.skipped_invalid} malformed number` : null,
     summary.failed ? `${summary.failed} failed` : null,
   ].filter(Boolean).join(', ');
   await logIntake(summary.created > 0 ? 'intake_received' : 'intake_skipped',
