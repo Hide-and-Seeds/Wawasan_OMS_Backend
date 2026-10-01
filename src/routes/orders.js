@@ -649,11 +649,14 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
   const taken = new Set(existing.keys());
   const blank = (v) => v === null || v === undefined || String(v).trim() === '';
   const results = [];
-  let created = 0, duplicate = 0, failed = 0, backfilled = 0, skipped_marketplace = 0;
+  let created = 0, duplicate = 0, failed = 0, backfilled = 0, skipped_marketplace = 0, skipped_sales_order = 0;
   for (const inv of invoices) {
     // Marketplace invoices (Lazada/Shopee/TikTok) use a DOCNO prefixed 'L' and are
     // handled by a separate commerce team - never import them into the OMS.
     if (/^L/i.test(String(inv.invoice_number || ''))) { skipped_marketplace++; results.push({ invoice_number: inv.invoice_number, status: 'skipped_marketplace' }); continue; }
+    // Sales Order numbers (SO-...) stay off the board by owner request, even when one is
+    // saved as an invoice (SO-00156 reached SL_IV that way on 2026-10-01).
+    if (/^SO/i.test(String(inv.invoice_number || ''))) { skipped_sales_order++; results.push({ invoice_number: inv.invoice_number, status: 'skipped_sales_order' }); continue; }
     if (taken.has(inv.invoice_number)) {
       // Existing order: never overwrite, but fill a MISSING delivery address / contact if
       // this re-sync now carries one (e.g. the bridge started falling back to the billing
@@ -707,7 +710,7 @@ async function importParsedInvoices(invoices, createdBy, ipAddress) {
       else { failed++; results.push({ invoice_number: inv.invoice_number, status: 'failed', error: e.message }); }
     }
   }
-  return { created, duplicate, failed, backfilled, skipped_marketplace, results };
+  return { created, duplicate, failed, backfilled, skipped_marketplace, skipped_sales_order, results };
 }
 
 // POST /api/orders/import — bulk-import invoices from a SQL Account CSV export.
@@ -1416,6 +1419,13 @@ router.post('/webhook/sql-account', asyncHandler(async (req, res) => {
       `Invoice ${invoice_number} skipped: marketplace number (starts with L), handled by the commerce team`, req.ip);
     return res.status(200).json({ skipped: 'marketplace', invoice_number });
   }
+  // Sales Order numbers (SO-...) stay off the board by owner request, even when one is
+  // saved as an invoice. Same 200 as above so the relay does not retry it.
+  if (/^SO/i.test(String(invoice_number))) {
+    await logIntake('intake_skipped',
+      `Invoice ${invoice_number} skipped: Sales Order number (starts with SO), kept off the board`, req.ip);
+    return res.status(200).json({ skipped: 'sales_order', invoice_number });
+  }
 
   // Sanitise rather than reject: an automated trigger must never drop an invoice
   // because of one stray field. Bad values fall back to the safe default.
@@ -1524,6 +1534,7 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
   const declined = [
     summary.duplicate ? `${summary.duplicate} already on the board` : null,
     summary.skipped_marketplace ? `${summary.skipped_marketplace} marketplace` : null,
+    summary.skipped_sales_order ? `${summary.skipped_sales_order} sales order` : null,
     summary.failed ? `${summary.failed} failed` : null,
   ].filter(Boolean).join(', ');
   await logIntake(summary.created > 0 ? 'intake_received' : 'intake_skipped',
