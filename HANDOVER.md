@@ -517,6 +517,7 @@ At the top of `App.jsx`:
 - **`.ps1` ship scripts must be ASCII** — PS 5.1 misreads no-BOM UTF-8 as ANSI; smart quotes/em-dashes throw a fake "Missing closing '}'" on an unrelated line.
 - **Vite CJS default-export trap** — prod bundle may hand a CJS lib's default as `{default: fn}`; unwrap before calling (broke `jspdf-autotable` PDFs).
 - **Relay must exclude `L%`** — marketplace invoices are manual; importing them duplicates orders + explains "missing addresses".
+- **Relay rows must be one line each** — a SQL Account value with a line break (seen: a customer name ending in Enter) splits a row; a batch cut between the halves turns it into garbage cards. `Sync-Once.ps1` flattens CR/LF in SQL; the server declines any invoice number that fails `INVOICE_NUMBER_RE`.
 - **Parallel sessions** — another agent/session may have these repos open; stage only your own paths, serialize edits to a shared file.
 
 ---

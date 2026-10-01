@@ -22,10 +22,14 @@ Copy-Item -LiteralPath $FdbPath -Destination $copy -Force
 
 # 2. CSV-emitting query (one row per invoice line). The SQL builds quoted, escaped
 #    CSV fields itself; we prepend the header below. Date is forced to ISO YYYY-MM-DD.
+#    The outer REPLACE turns any CR/LF inside a value into a space so each invoice line
+#    is exactly ONE output line. A customer name ending in a line break once printed a
+#    row as two lines; a batch boundary fell between them and the cloud parsed the
+#    half-row into garbage orders (2026-10-01).
 $q = @'
 SET HEADING OFF;
 SET LIST OFF;
-SELECT
+SELECT REPLACE(REPLACE(
  '"'||REPLACE(TRIM(h.DOCNO),'"','""')||'",'||
  (EXTRACT(YEAR FROM h.DOCDATE)||'-'||LPAD(EXTRACT(MONTH FROM h.DOCDATE),2,'0')||'-'||LPAD(EXTRACT(DAY FROM h.DOCDATE),2,'0'))||','||
  '"'||REPLACE(COALESCE(h.COMPANYNAME,''),'"','""')||'",'||
@@ -42,6 +46,7 @@ SELECT
  '"'||REPLACE(COALESCE(CASE WHEN COALESCE(TRIM(h.DADDRESS1),'')='' THEN h.POSTCODE ELSE h.DPOSTCODE END,''),'"','""')||'",'||
  '"'||REPLACE(COALESCE(CASE WHEN COALESCE(TRIM(h.DADDRESS1),'')='' THEN h.CITY ELSE h.DCITY END,''),'"','""')||'",'||
  '"'||REPLACE(COALESCE(CASE WHEN COALESCE(TRIM(h.DADDRESS1),'')='' THEN h.STATE ELSE h.DSTATE END,''),'"','""')||'"'
+, ASCII_CHAR(13), ' '), ASCII_CHAR(10), ' ')
 FROM SL_IV h JOIN SL_IVDTL d ON d.DOCKEY=h.DOCKEY
 WHERE h.CANCELLED=FALSE AND h.DOCDATE IS NOT NULL AND UPPER(h.DOCNO) NOT LIKE 'L%' AND UPPER(h.DOCNO) NOT LIKE 'SO%' AND h.DOCDATE >= CURRENT_DATE - __DAYS__
 ORDER BY h.DOCNO, d.SEQ;
