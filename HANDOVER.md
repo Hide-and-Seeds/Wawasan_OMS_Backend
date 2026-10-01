@@ -437,12 +437,12 @@ At the top of `App.jsx`:
 
 ### 11.1 SQL Account → OMS
 
-**Goal:** wholesale/B2B `SI…` invoices created in SQL Account appear on the board automatically. Marketplace `L…` invoices are **excluded** (they're entered manually and also exist in SQL Account — importing them would duplicate manual orders).
+**Goal:** wholesale/B2B `SI…` invoices created in SQL Account appear on the board automatically. Marketplace `L…` invoices are **excluded** (they're entered manually and also exist in SQL Account — importing them would duplicate manual orders). Sales Order numbers `SO…` are **excluded** too, by owner request, even when one is saved as an invoice (`SO-00156` reached `SL_IV` that way on 2026-10-01).
 
 **Webhook contract** (`POST /api/orders/webhook/sql-account`, header `x-webhook-secret`): only `invoice_number` + `customer_name` required; items carry `sku/name/quantity/unit`; no money. Full contract, response codes, and a test command are in **`oms-backend/SQL-ACCOUNT-WEBHOOK.md`**; developer parity notes in **`oms-backend/INTEGRATION-NOTES.md`**.
 
 **On-prem relay** (SQL Account is embedded Firebird on the office PC — no TCP server). Three variants under `oms-backend/sql-account-bridge/`:
-- **`windows-firebird-auto/`** — the shipped solution. Polls the live `.FDB` mtime, runs FB5 `isql` → CSV → POSTs the webhook. Auto-detects the newest-mtime DB (client live DB = `ACC-0009.FDB`), excludes `L%`. Includes `Install.ps1`, `RUN-ME.bat`, **`SYNC-NOW.bat`** (force a sync), `TURN-OFF.bat`. Packaged for the client as `WawasanOMS-FactorySync.zip` (workspace root).
+- **`windows-firebird-auto/`** — the shipped solution. Polls the live `.FDB` mtime, runs FB5 `isql` → CSV → POSTs the webhook. Auto-detects the newest-mtime DB (client live DB = `ACC-0009.FDB`), excludes `L%` and `SO%`. Includes `Install.ps1`, `RUN-ME.bat`, **`SYNC-NOW.bat`** (force a sync), `TURN-OFF.bat`. Packaged for the client as `WawasanOMS-FactorySync.zip` (workspace root).
 - **`windows-no-node/`** — no-Node PowerShell CSV relay (interim).
 - **`bridge.mjs`** — Firebird-direct poll route (`fromFirebird`, stubbed) — the eventual "instant, no export" path; needs Node + `node-firebird` + the live `.FDB` table names on-prem.
 
