@@ -846,6 +846,20 @@ router.get('/audit', authenticate, requireCap('page.audit'), asyncHandler(async 
   res.json({ logs, total, page: parseInt(page) });
 }));
 
+// GET /api/reports/audit/facets — every user and action that has a row, for the Audit
+// Trail's filters. They were built from the newest 200 rows on screen, so filtering by
+// a person whose edits sat further back found nothing (2026-10-07). The screen now
+// offers these and sends the choice to /audit as user_id / action.
+router.get('/audit/facets', authenticate, requireCap('page.audit'), asyncHandler(async (req, res) => {
+  const users = (await query(`
+    SELECT u.id, u.name FROM users u
+    WHERE EXISTS (SELECT 1 FROM activity_log al WHERE al.user_id = u.id)
+    ORDER BY u.name
+  `)).rows;
+  const actions = (await query('SELECT DISTINCT action FROM activity_log ORDER BY action')).rows.map((r) => r.action);
+  res.json({ users, actions });
+}));
+
 // ─── Reward scorecard / leaderboard ──────────────────────────────────────────
 // Composite 0–100 score per department or per person, for the monthly reward
 // engine + the floor leaderboard. Four pillars — On-time, Output, Quality, Speed —
