@@ -798,8 +798,26 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 
   await query(`UPDATE orders SET ${updates.join(', ')} WHERE id = $${idIdx}`, values);
 
-  await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'order_edited',
-    details: `Fields updated: ${fields.filter(f => req.body[f] !== undefined).join(', ')}`, ipAddress: req.ip });
+  // Before → after for every field that actually changed, so the Audit Trail answers
+  // "who changed what" (asked 2026-10-07). A save that changes nothing writes nothing,
+  // the same rule Settings follows. Dates compare as YYYY-MM-DD; the PIC is named.
+  const asText = (f, v) => { const s = v === null || v === undefined ? '' : String(v); return /_date$/.test(f) ? s.slice(0, 10) : s; };
+  const changed = fields.filter((f) => req.body[f] !== undefined && asText(f, req.body[f]) !== asText(f, order[f]));
+  if (changed.length) {
+    const before = {}, after = {};
+    for (const f of changed) { before[f] = asText(f, order[f]); after[f] = asText(f, req.body[f]); }
+    if (changed.includes('pic_id')) {
+      const nameOf = async (id) => (id ? ((await query('SELECT name FROM users WHERE id = $1', [id])).rows[0] || {}).name || id : '');
+      before.pic_id = await nameOf(order.pic_id);
+      after.pic_id = await nameOf(req.body.pic_id);
+    }
+    const LABEL = { customer_name: 'customer', customer_contact: 'contact', required_delivery_date: 'delivery date',
+      expiry_date: 'expiry date', pic_id: 'PIC', delivery_address: 'address' };
+    const show = (v) => (v.trim() === '' ? '(blank)' : v.replace(/\s+/g, ' ').slice(0, 80));
+    await logActivity(query, { orderId: req.params.id, userId: req.user.id, action: 'order_edited',
+      details: changed.map((f) => `${LABEL[f] || f}: ${show(before[f])} → ${show(after[f])}`).join('; '),
+      oldValue: JSON.stringify(before), newValue: JSON.stringify(after), ipAddress: req.ip });
+  }
 
   // The rush flag and customer tier pace the floor's work — ping the owner + current
   // stage team when either actually changes. Quiet field-only edits (notes/dates) stay quiet.
@@ -1257,11 +1275,25 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   if (progressing) {
     action = effStatus === 'done' ? 'item_made' : effStatus === 'in_progress' ? 'item_progress' : 'item_reopened';
   }
+  // Before → after for the Audit Trail (asked 2026-10-07): each amended field, and for
+  // progress the line's previous state on this track.
+  const parts = [];
+  if (b.quantity !== undefined && qty !== Math.round(Number(item.quantity) || 0)) parts.push(`qty ${Math.round(item.quantity)} → ${qty}`);
+  if (b.sku !== undefined && b.sku !== item.sku) parts.push(`STK ${item.sku} → ${b.sku}`);
+  if (b.name !== undefined && b.name !== item.name) parts.push(`name "${item.name}" → "${b.name}"`);
+  if (b.unit !== undefined && b.unit !== item.unit) parts.push(`unit ${item.unit || '(blank)'} → ${b.unit}`);
+  let oldValue = null, newValue = null;
+  if (progressing) {
+    const unit = item.unit || 'pcs';
+    const prevQty = Math.round(Number(track === 'packing' ? item.pack_qty : item.made_qty) || 0);
+    oldValue = countingQty ? `${prevQty}/${qty} ${unit}` : ((track === 'packing' ? item.pack_status : item.status) || 'not_started');
+    newValue = countingQty ? `${doneQty}/${qty} ${unit}` : effStatus;
+    parts.unshift(`${track} ${oldValue} → ${newValue}`);
+  }
   await logActivity(query, {
     orderId: req.params.id, userId: req.user.id, action,
-    details: progressing
-      ? `${item.sku} — ${item.name} (${countingQty ? `${doneQty}/${qty} ${item.unit || 'pcs'}` : effStatus})`
-      : `${item.sku} — ${item.name}`,
+    details: `${item.sku} — ${item.name}${parts.length ? `: ${parts.join('; ')}` : ''}`,
+    oldValue, newValue,
     ipAddress: req.ip || null,
   });
 
@@ -1269,11 +1301,6 @@ router.patch('/:id/items/:itemId', authenticate, asyncHandler(async (req, res) =
   // building the order — the PIC + current stage team — since they may be mid-work on
   // the old values. Progress ticks (mark-made) stay quiet.
   if (action === 'item_edited' && ord) {
-    const parts = [];
-    if (b.quantity !== undefined && qty !== Math.round(Number(item.quantity) || 0)) parts.push(`qty ${Math.round(item.quantity)} → ${qty}`);
-    if (b.sku !== undefined && b.sku !== item.sku) parts.push(`STK ${item.sku} → ${b.sku}`);
-    if (b.name !== undefined && b.name !== item.name) parts.push('renamed');
-    if (b.unit !== undefined && b.unit !== item.unit) parts.push(`unit → ${b.unit}`);
     await notifyOwners(query, { order: ord,
       title: `Order ${ord.invoice_number}: item amended`,
       message: `${item.name} — ${parts.join(', ') || 'updated'} · by ${req.user.name}`,
@@ -1511,7 +1538,10 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
     return res.status(401).json({ error: 'Invalid webhook secret' });
   }
   if (!(await orderIntakeEnabled())) {
-    await logIntake('intake_skipped', 'Order tracking is paused — an emailed CSV was not recorded', req.ip);
+    // Said once an hour at most: the relay knocks every few minutes while paused.
+    const saidRecently = (await query(`SELECT 1 FROM activity_log WHERE action = 'intake_skipped'
+      AND details LIKE 'Order tracking is paused%batch%' AND created_at > now() - interval '1 hour' LIMIT 1`)).rows[0];
+    if (!saidRecently) await logIntake('intake_skipped', 'Order tracking is paused — an invoice batch from SQL Account was not recorded', req.ip);
     return res.status(200).json({ skipped: 'intake_disabled', message: 'Order tracking is paused by the administrator.' });
   }
   await ensureImportance();
@@ -1542,16 +1572,25 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
   // One line per delivery rather than per invoice: the batch is what arrived, and the
   // counts say what became of it. Declines are named so a silent drop cannot happen
   // twice without somebody being able to see it.
-  const declined = [
-    summary.duplicate ? `${summary.duplicate} already on the board` : null,
-    summary.skipped_marketplace ? `${summary.skipped_marketplace} marketplace` : null,
-    summary.skipped_sales_order ? `${summary.skipped_sales_order} sales order` : null,
-    summary.skipped_invalid ? `${summary.skipped_invalid} malformed number` : null,
-    summary.failed ? `${summary.failed} failed` : null,
-  ].filter(Boolean).join(', ');
-  await logIntake(summary.created > 0 ? 'intake_received' : 'intake_skipped',
-    `Emailed CSV: ${invoices.length} invoice${invoices.length === 1 ? '' : 's'} received, ${summary.created} created`
-      + (declined ? ` — ${declined}` : ''), req.ip);
+  //
+  // But a batch of nothing except invoices already on the board is not news: the
+  // Firebird relay re-sends its whole window every few minutes, so logging those wrote
+  // hundreds of rows a day and pushed every real edit out of the Audit Trail's view
+  // (2026-10-07). Log a batch only when it created something or declined something.
+  const declinedForReason = summary.skipped_marketplace + summary.skipped_sales_order
+    + summary.skipped_invalid + summary.failed;
+  if (summary.created > 0 || declinedForReason > 0) {
+    const declined = [
+      summary.duplicate ? `${summary.duplicate} already on the board` : null,
+      summary.skipped_marketplace ? `${summary.skipped_marketplace} marketplace` : null,
+      summary.skipped_sales_order ? `${summary.skipped_sales_order} sales order` : null,
+      summary.skipped_invalid ? `${summary.skipped_invalid} malformed number` : null,
+      summary.failed ? `${summary.failed} failed` : null,
+    ].filter(Boolean).join(', ');
+    await logIntake(summary.created > 0 ? 'intake_received' : 'intake_skipped',
+      `SQL Account batch: ${invoices.length} invoice${invoices.length === 1 ? '' : 's'} received, ${summary.created} created`
+        + (declined ? ` — ${declined}` : ''), req.ip);
+  }
   res.status(201).json({ mode: 'commit', total: invoices.length, ...summary });
 }));
 
