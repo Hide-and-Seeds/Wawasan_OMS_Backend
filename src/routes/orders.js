@@ -1569,27 +1569,31 @@ router.post('/webhook/sql-account-csv', asyncHandler(async (req, res) => {
   if (!systemUser) return res.status(500).json({ error: 'No system user configured' });
 
   const summary = await importParsedInvoices(invoices, systemUser.id, req.ip);
-  // One line per delivery rather than per invoice: the batch is what arrived, and the
-  // counts say what became of it. Declines are named so a silent drop cannot happen
-  // twice without somebody being able to see it.
-  //
-  // But a batch of nothing except invoices already on the board is not news: the
-  // Firebird relay re-sends its whole window every few minutes, so logging those wrote
-  // hundreds of rows a day and pushed every real edit out of the Audit Trail's view
-  // (2026-10-07). Log a batch only when it created something or declined something.
-  const declinedForReason = summary.skipped_marketplace + summary.skipped_sales_order
-    + summary.skipped_invalid + summary.failed;
-  if (summary.created > 0 || declinedForReason > 0) {
-    const declined = [
-      summary.duplicate ? `${summary.duplicate} already on the board` : null,
-      summary.skipped_marketplace ? `${summary.skipped_marketplace} marketplace` : null,
-      summary.skipped_sales_order ? `${summary.skipped_sales_order} sales order` : null,
-      summary.skipped_invalid ? `${summary.skipped_invalid} malformed number` : null,
-      summary.failed ? `${summary.failed} failed` : null,
-    ].filter(Boolean).join(', ');
-    await logIntake(summary.created > 0 ? 'intake_received' : 'intake_skipped',
-      `SQL Account batch: ${invoices.length} invoice${invoices.length === 1 ? '' : 's'} received, ${summary.created} created`
-        + (declined ? ` — ${declined}` : ''), req.ip);
+  // The Firebird relay re-sends its whole window every few minutes, so per-batch lines
+  // flooded the Audit Trail and buried every real edit (2026-10-07). Two rules now:
+  // a batch that created orders gets one intake_received line (that is news), and an
+  // invoice turned away for a reason is named on its own line ONCE A DAY -- the same
+  // invoice comes back in every batch until it ages out of the window. Invoices that
+  // are simply already on the board are the normal case and are not logged at all.
+  if (summary.created > 0) {
+    await logIntake('intake_received',
+      `SQL Account batch: ${invoices.length} invoice${invoices.length === 1 ? '' : 's'} received, ${summary.created} created`, req.ip);
+  }
+  const REASON = {
+    skipped_marketplace: 'marketplace number (starts with L), handled by the commerce team',
+    skipped_sales_order: 'Sales Order number (starts with SO), kept off the board',
+    skipped_invalid: 'not a valid invoice number',
+  };
+  const declines = [...new Set(summary.results
+    .filter((r) => REASON[r.status] || r.status === 'failed')
+    .map((r) => `Invoice ${String(r.invoice_number || '').slice(0, 60)} skipped: `
+      + (REASON[r.status] || `could not be saved (${String(r.error || '').slice(0, 120)})`)))];
+  if (declines.length) {
+    const saidToday = new Set((await query(
+      `SELECT details FROM activity_log WHERE action = 'intake_skipped'
+         AND created_at > now() - interval '24 hours' AND details = ANY($1::text[])`, [declines]
+    )).rows.map((r) => r.details));
+    for (const line of declines) if (!saidToday.has(line)) await logIntake('intake_skipped', line, req.ip);
   }
   res.status(201).json({ mode: 'commit', total: invoices.length, ...summary });
 }));
