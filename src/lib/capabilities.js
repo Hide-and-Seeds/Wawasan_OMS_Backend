@@ -132,6 +132,14 @@ const CAPABILITIES = [
     roles: ['admin', 'production_lead'],
   },
   {
+    // Was a hardcoded list hiding the customer from all three floor roles. The client
+    // asked on 2026-10-12 for the Production Head to see it, so it became a switch and
+    // production_lead joined the default. Enforced in routes/orders.js + delivery.js.
+    id: 'order.see_customer', group: 'Orders', label: 'See customer details',
+    help: 'Show the customer name, phone and delivery address on orders and deliveries. Without it a card shows its line count instead of the name.',
+    roles: ['admin', 'production_lead', 'delivery_team'],
+  },
+  {
     id: 'order.amend_line', group: 'Orders', label: 'Correct a line',
     help: 'Fix the quantity, STK code or unit on a line already on the board.',
     roles: ['admin'],

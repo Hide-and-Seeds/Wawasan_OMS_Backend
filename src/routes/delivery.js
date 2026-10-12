@@ -6,7 +6,7 @@ const multer = require('multer');
 const { query, withTransaction } = require('../utils/db');
 const { authenticate } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
-const { assertCap } = require('../lib/capabilities');
+const { assertCap, can } = require('../lib/capabilities');
 const { uploadBuffer, publicUrl } = require('../lib/supabaseClient');
 
 const upload = multer({
@@ -65,8 +65,8 @@ async function notifyDelivered(q, orderId, actorId, actorName, kind, noProof = f
   }
 }
 
-// Production-floor roles must not see the customer — mirror the scrub in orders.js.
-const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_staff'];
+// Who the customer is follows the order.see_customer capability, the same switch
+// orders.js uses, so the two screens can never disagree about a role.
 
 // GET /api/delivery — list deliveries
 router.get('/', authenticate, asyncHandler(async (req, res) => {
@@ -99,7 +99,7 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     const { pod_file, ...rest } = d;
     return { ...rest, pod_url: pod_file ? publicUrl(pod_file) : null };
   });
-  const hideCustomer = CUSTOMER_HIDDEN_ROLES.includes(req.user.role);
+  const hideCustomer = !(await can(req.user.role, 'order.see_customer'));
   res.json(hideCustomer ? out.map((d) => ({ ...d, customer_name: null, address: null })) : out);
 }));
 

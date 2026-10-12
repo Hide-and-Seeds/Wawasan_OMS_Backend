@@ -67,11 +67,12 @@ const INVOICE_NUMBER_RE = /^[A-Za-z0-9][A-Za-z0-9/_-]{2,39}$/;
 // implausible quantity could take the shared kanban query down for every user.
 const MAX_LINE_QTY = 1000000000;
 const VALID_ITEM_STATUS = ['not_started', 'in_progress', 'done'];
-// Production-floor roles must not see *who* the customer is; they get the
-// importance tier in its place. Ops/Admin and delivery_team keep the name.
-const CUSTOMER_HIDDEN_ROLES = ['production_lead', 'production_staff', 'packing_staff'];
-function scrubCustomer(order, role) {
-  if (!order || !CUSTOMER_HIDDEN_ROLES.includes(role)) return order;
+// Who the customer is depends on the capability order.see_customer, which the owners
+// set per role in the permissions panel. Without it the name and phone are removed
+// and the card shows its line count instead. Callers resolve it once per request:
+//   const showCustomer = await can(req.user.role, 'order.see_customer');
+function scrubCustomer(order, showCustomer) {
+  if (!order || showCustomer) return order;
   return { ...order, customer_name: null, customer_contact: null };
 }
 
@@ -267,7 +268,8 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const orders = (await query(sql, params)).rows.map((o) => scrubCustomer(o, req.user.role));
+  const showCustomer = await can(req.user.role, 'order.see_customer');
+  const orders = (await query(sql, params)).rows.map((o) => scrubCustomer(o, showCustomer));
   res.json({ orders, total, page: parseInt(page), limit: parseInt(limit) });
 }));
 
@@ -315,11 +317,12 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
 
   const allOrders = (await query(sql)).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
-  // Production-floor roles must not see the customer, so scrub like the list and
-  // detail endpoints do. The board card falls back to the item count when
+  // Roles without order.see_customer get the customer scrubbed, like the list and
+  // detail endpoints. The board card falls back to the item count when
   // customer_name is null, so the UI stays intact for those roles.
+  const showCustomer = await can(req.user.role, 'order.see_customer');
   for (const o of allOrders) {
-    if (board[o.stage]) board[o.stage].push(scrubCustomer(o, req.user.role));
+    if (board[o.stage]) board[o.stage].push(scrubCustomer(o, showCustomer));
   }
 
   res.json(board);
@@ -565,7 +568,7 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
     WHERE st.order_id = $1 ORDER BY st.created_at ASC
   `, [order.id])).rows;
 
-  res.json(scrubCustomer({ ...order, items, attachments, activity, transitions }, req.user.role));
+  res.json(scrubCustomer({ ...order, items, attachments, activity, transitions }, await can(req.user.role, 'order.see_customer')));
 }));
 
 // POST /api/orders — create order
