@@ -273,19 +273,15 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
   res.json({ orders, total, page: parseInt(page), limit: parseInt(limit) });
 }));
 
-// GET /api/orders/kanban — grouped by stage
-router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
-  const { week } = req.query;
-  await ensureItemColumns();
-  await ensureOrderFlags();
-  await ensureImportance();
-  await ensureSortOrder();
-
+// The board query, shared by /kanban (the rows) and /kanban/version (a hash of the
+// same rows). `week` is only compared with 'current', never inlined, so the SQL
+// carries no user input.
+function kanbanSql(week) {
   const weekFilter = week === 'current'
     ? "AND date_trunc('week', o.required_delivery_date) = date_trunc('week', now())"
     : '';
 
-  const sql = `
+  return `
     SELECT o.*,
       u.name AS pic_name, u.avatar_color AS pic_color,
       pu.name AS pack_pic_name, pu.avatar_color AS pack_pic_color,
@@ -314,8 +310,20 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
       o.required_delivery_date ASC NULLS LAST,
       o.invoice_number ASC
   `;
+}
 
-  const allOrders = (await query(sql)).rows;
+async function ensureKanbanColumns() {
+  await ensureItemColumns();
+  await ensureOrderFlags();
+  await ensureImportance();
+  await ensureSortOrder();
+}
+
+// GET /api/orders/kanban — grouped by stage
+router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
+  await ensureKanbanColumns();
+
+  const allOrders = (await query(kanbanSql(req.query.week))).rows;
   const board = { order: [], production: [], packing: [], ready_for_delivery: [], on_hold: [] };
   // Roles without order.see_customer get the customer scrubbed, like the list and
   // detail endpoints. The board card falls back to the item count when
@@ -326,6 +334,27 @@ router.get('/kanban', authenticate, asyncHandler(async (req, res) => {
   }
 
   res.json(board);
+}));
+
+// GET /api/orders/kanban/version — a fingerprint of the board, so open screens can
+// poll it every few seconds and fetch /kanban only when it changes. The board rows
+// stay inside Postgres and only the md5 leaves, which matters on the Supabase Free
+// plan's 5 GB/month egress (the full board is tens of KB a call; this is ~100 bytes).
+// It hashes the very query /kanban runs instead of comparing updated_at, because not
+// every change touches a timestamp: order_items has none, and a delivery status or
+// a PIC's name reaches the board through a join. Rows are hashed in id order so the
+// result does not depend on the plan; sort_order is in every row, so a reorder still
+// changes it. The customer switch is appended because it changes /kanban's output
+// without changing any row.
+router.get('/kanban/version', authenticate, asyncHandler(async (req, res) => {
+  await ensureKanbanColumns();
+
+  const { v } = (await query(
+    `SELECT md5(COALESCE(string_agg(b::text, '|' ORDER BY b.id), '')) AS v FROM (${kanbanSql(req.query.week)}) b`
+  )).rows[0];
+  const showCustomer = await can(req.user.role, 'order.see_customer');
+
+  res.json({ version: showCustomer ? v : `${v}:scrubbed` });
 }));
 
 // GET /api/orders/stats — lightweight board stats (any authenticated user)
