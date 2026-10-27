@@ -22,9 +22,20 @@ $poll   = if($PollSeconds){ [int]$PollSeconds } else { 5 }
 $deb    = if($DebounceSeconds){ [int]$DebounceSeconds } else { 4 }
 $safety = if($SafetyMinutes){ [double]$SafetyMinutes } else { 10 }
 
-# stamp = LastWrite ticks + file length; changes whenever SQL Account writes the DB.
+# stamp = name + LastWrite ticks + length of the newest ACC-*.FDB in the DB folder, so it
+# changes whenever SQL Account writes the DB AND when it moves the company to another
+# copy (Sync-Once follows the move; see its step 0). $FollowNewestDb = $false pins it
+# to $FdbPath. Reads the folder, not $FdbPath, so archiving the old copy cannot blind it.
 function Get-FdbStamp {
-  try { $f=Get-Item -LiteralPath $FdbPath -EA Stop; return ('{0}:{1}' -f $f.LastWriteTimeUtc.Ticks, $f.Length) } catch { return $null }
+  try {
+    $f = $null
+    if($FollowNewestDb -ne $false){
+      $f = Get-ChildItem -LiteralPath (Split-Path -Parent $FdbPath) -Filter 'ACC-*.FDB' -File -EA Stop |
+           Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    }
+    if(-not $f){ $f = Get-Item -LiteralPath $FdbPath -EA Stop }
+    return ('{0}:{1}:{2}' -f $f.Name, $f.LastWriteTimeUtc.Ticks, $f.Length)
+  } catch { return $null }
 }
 
 Write-Log "Watch started (poll ${poll}s, debounce ${deb}s, safety ${safety}m) on $FdbPath"
