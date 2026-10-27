@@ -13,6 +13,31 @@ function Write-Log($m){ $l=('{0}  {1}' -f (Get-Date -Format 's'),$m); Write-Host
 
 if(-not $WebhookSecret -or $WebhookSecret -eq 'PASTE_THE_WEBHOOK_SECRET_HERE'){ throw 'Set $WebhookSecret in config.ps1' }
 if(-not $FdbPath -or -not (Test-Path -LiteralPath $FdbPath)){ throw "FDB not found: '$FdbPath' (set FdbPath in config.ps1, or run Install.ps1)" }
+
+# 0. follow SQL Account to its newest copy of the company data. It has moved the company
+#    to a new ACC-*.FDB every few weeks (0013 -> 0016 -> 0004 -> 0005, Sep-Oct 2026) and
+#    carries on numbering there; a pinned path then reads a file nobody writes and the
+#    board silently stops filling. Use whichever ACC-*.FDB next to $FdbPath was saved
+#    last, and save the switch into config.ps1 so Diagnose and later runs agree.
+#    Opening an old copy just to look can make it "newest" for a while: harmless, its
+#    invoices are already on the board (the cloud de-dups) and the next save to the live
+#    file switches back. Set $FollowNewestDb = $false in config.ps1 to pin $FdbPath.
+if($FollowNewestDb -ne $false){
+  $newest = Get-ChildItem -LiteralPath (Split-Path -Parent $FdbPath) -Filter 'ACC-*.FDB' -File -EA SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+  if($newest -and $newest.FullName -ne $FdbPath){
+    Write-Log ("SQL Account is now saving to {0} - switching from {1}" -f $newest.Name, (Split-Path -Leaf $FdbPath))
+    try{
+      $cfgPath = "$PSScriptRoot\config.ps1"
+      $lines = Get-Content -LiteralPath $cfgPath | ForEach-Object {
+        if($_ -match '^\s*\$FdbPath\s*='){ '$FdbPath       = "' + $newest.FullName + '"' } else { $_ }
+      }
+      Set-Content -LiteralPath $cfgPath -Value $lines -Encoding ASCII
+    }catch{ Write-Log ("could not save the switch to config.ps1: " + $_.Exception.Message) }
+    $FdbPath = $newest.FullName
+  }
+}
+
 $isql = Join-Path $FirebirdDir 'isql.exe'
 if(-not (Test-Path -LiteralPath $isql)){ throw "isql not found at $isql - run Install.ps1 first" }
 
@@ -57,6 +82,7 @@ $outFile= Join-Path $env:TEMP ("wws-out-$PID.txt")
 Set-Content -LiteralPath $qFile -Value $q -Encoding ASCII
 
 # 3. read the copy in embedded mode (no server)
+Remove-Item -LiteralPath $outFile -Force -EA SilentlyContinue   # isql -o appends, and inside Watch the name repeats every run (2026-10-27)
 & $isql -user SYSDBA -password masterkey -b -q -i $qFile -o $outFile $copy
 $code=$LASTEXITCODE
 Remove-Item -LiteralPath $copy -Force -EA SilentlyContinue
@@ -90,6 +116,7 @@ foreach($b in $batches){
   $payload=@{ csv = ($header + "`r`n" + ($b -join "`r`n")) }
   if($DryRun){ $payload.dry_run=$true }
   $body=$payload | ConvertTo-Json -Compress
+  $body=[regex]::Replace($body,'[^\x00-\x7F]',{ param($m) '\u{0:x4}' -f [int][char]$m.Value })   # ASCII-only JSON: PS 5.1 mangles other characters when sending (2026-10-27)
   try{
     $r=Invoke-RestMethod -Uri $WebhookUrl -Method Post -ContentType 'application/json' -Headers $hdrs -Body $body
     $tInv += [int]$r.total

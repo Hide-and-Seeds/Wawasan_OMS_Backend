@@ -10,6 +10,11 @@ $WebhookSecret = "PASTE_THE_WEBHOOK_SECRET_HERE"
 # Full path to the SQL Account database (.FDB). Leave "" to auto-detect under C:\eStream.
 $FdbPath       = ""
 
+# SQL Account sometimes moves the company to a new copy (ACC-0005 -> ACC-0006 ...).
+# $true = each sync reads whichever ACC-*.FDB in that folder was saved last, and updates
+# $FdbPath above to match. $false = always read exactly $FdbPath.
+$FollowNewestDb = $true
+
 # Only send invoices dated within this many days (keeps each send small; the cloud de-dups).
 $DaysBack      = 30
 
