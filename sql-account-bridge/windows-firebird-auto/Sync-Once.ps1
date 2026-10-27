@@ -90,7 +90,17 @@ if($code -ne 0){ $err=''; if(Test-Path $outFile){ $err=(Get-Content -LiteralPath
 
 # 4. collect emitted data lines (each starts with a double-quote)
 $header='DocNo,DocDate,CompanyName,Phone,Terms,ItemCode,Description,Qty,UOM,DeliveryAddress1,DeliveryAddress2,DeliveryAddress3,DeliveryAddress4,DeliveryAddress5,DeliveryAddress6,DeliveryAddress7'
-$rows = @(Get-Content -LiteralPath $outFile | Where-Object { $_ -match '^"' })
+# isql writes the stored bytes as they are. Text keyed in SQL Account is mostly UTF-8 (an
+# en dash in SI26100031 reached the board as "a-circumflex euro quote" when read as
+# Windows-1252, 2026-10-27), but older rows may be real Windows-1252. Split the file
+# byte-for-byte (Latin-1), then decode each line as UTF-8, falling back to 1252 only
+# for a line that is not valid UTF-8.
+$latin1 = [Text.Encoding]::GetEncoding(28591)
+$utf8   = New-Object System.Text.UTF8Encoding($false, $true)   # throws on invalid bytes
+$cp1252 = [Text.Encoding]::GetEncoding(1252)
+$rows = @($latin1.GetString([IO.File]::ReadAllBytes($outFile)) -split "`r?`n" |
+  Where-Object { $_ -match '^"' } |
+  ForEach-Object { $b = $latin1.GetBytes($_); try { $utf8.GetString($b) } catch { $cp1252.GetString($b) } })
 if($rows.Count -eq 0){ Write-Log 'no invoices in window - nothing to send'; return }
 
 # 5. split into batches of N invoices so no single POST is too large (Vercel 413 on
