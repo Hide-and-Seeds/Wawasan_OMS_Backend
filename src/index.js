@@ -62,10 +62,29 @@ app.use((req, res) => {
 });
 
 // ─── Error handler ───
+// The SQL Account relay on the client's PC can only read what comes back to it, and
+// the Vercel logs are not reachable from there (2026-10-27: one invoice 500'd on every
+// sync with nothing to go on). A caller that sends the webhook secret is the relay, so
+// it also gets the message, code and first stack frames, plus what Postgres says about
+// a database error (its stack is the driver's, so the table/column/constraint carry the
+// "where"). Everyone else still gets the bare line, as before.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err.stack || err);
-  res.status(500).json({ error: 'Internal server error' });
+  const body = { error: 'Internal server error' };
+  const secret = process.env.SQL_ACCOUNT_WEBHOOK_SECRET;
+  if (secret && req.headers['x-webhook-secret'] === secret) {
+    body.detail = String((err && err.message) || err).slice(0, 500);
+    if (err && err.code) body.code = err.code;
+    if (err && err.type) body.type = err.type;
+    if (err && err.stack) body.at = err.stack.split('\n').slice(1, 3).map((l) => l.trim());
+    const pg = {};
+    for (const k of ['detail', 'hint', 'table', 'column', 'constraint', 'routine', 'where']) {
+      if (err && err[k]) pg[k] = String(err[k]).slice(0, 300);
+    }
+    if (Object.keys(pg).length) body.pg = pg;
+  }
+  res.status(500).json(body);
 });
 
 // Only start a listener when run directly (local dev / traditional host).
