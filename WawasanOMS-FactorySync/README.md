@@ -19,7 +19,7 @@ SQL Account saves an invoice
 Everything runs as the logged-in user. No service, no admin.
 
 ## Install (one time, on the SQL Account PC)
-1. Copy this `windows-firebird-auto` folder onto the PC, e.g. `C:\WawasanOMS-Sync`.
+1. Copy this `WawasanOMS-FactorySync` folder onto the PC, e.g. `C:\WawasanOMS-FactorySync`.
 2. Copy `config.example.ps1` to `config.ps1`, open in Notepad, paste the
    **webhook secret** (the backend's `SQL_ACCOUNT_WEBHOOK_SECRET`). Leave
    `$FdbPath` blank to auto-detect, or set it.
