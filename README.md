@@ -2,6 +2,11 @@
 
 Node.js + Express backend for the Order Management System, backed by **Supabase Postgres** and deployable to **Vercel** (serverless functions).
 
+> **Factory Sync (SQL Account → OMS):** the relay that runs on the office PC and
+> sends new SQL Account invoices to the board lives in
+> [`/WawasanOMS-FactorySync`](WawasanOMS-FactorySync/). Start with its
+> `READ-ME-FIRST.txt`.
+
 ## Quick Start (local dev)
 
 ```bash

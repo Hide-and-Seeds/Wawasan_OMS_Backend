@@ -1,5 +1,9 @@
 # SQL Account → OMS bridge
 
+> **Looking for the relay that runs on the office PC?** It moved to
+> [`/WawasanOMS-FactorySync`](../WawasanOMS-FactorySync/) at the repo root.
+> This folder keeps the older/alternative relays and Firebird tools.
+
 Standalone poller: reads **new SQL Account sales invoices** and POSTs each to the
 OMS webhook, so the order auto-appears on the board (Order column → production
 flow). **Not** part of the Vercel app — it runs on a PC at the office that can see

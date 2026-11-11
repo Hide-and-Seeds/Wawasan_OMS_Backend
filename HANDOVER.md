@@ -189,7 +189,8 @@ oms-backend/
 ├── demo-seed.sql             # demo data for showcasing
 ├── migrations/               # 001..008 incremental migrations (see §8.3)
 ├── reference-skus.md         # finished-goods STK reference
-├── sql-account-bridge/       # on-prem SQL Account → OMS relay (see §11.1)
+├── WawasanOMS-FactorySync/   # THE live SQL Account → OMS relay, runs on the office PC (see §11.1)
+├── sql-account-bridge/       # older/alternative relays + Firebird tools (see §11.1)
 ├── webhook-test/             # local webhook testers + client-facing preview
 ├── email-to-board/           # Google Apps Script email → board
 ├── README.md  PLAN.md  INTEGRATION-NOTES.md  SQL-ACCOUNT-WEBHOOK.md
@@ -285,7 +286,7 @@ npm run lint
 | `VITE_API_URL` | Backend base URL **including `/api`, no trailing slash**. Local `http://localhost:3001/api`; prod `https://<backend>.vercel.app/api`. |
 
 ### 7.3 Other `.env`s
-- `oms-backend/sql-account-bridge/.env` and `windows-*/config.ps1` — relay target URL + webhook secret (on the office PC).
+- `oms-backend/sql-account-bridge/.env` and `WawasanOMS-FactorySync/config.ps1` / `sql-account-bridge/windows-no-node/config.ps1` — relay target URL + webhook secret (on the office PC).
 
 ---
 
@@ -441,10 +442,10 @@ At the top of `App.jsx`:
 
 **Webhook contract** (`POST /api/orders/webhook/sql-account`, header `x-webhook-secret`): only `invoice_number` + `customer_name` required; items carry `sku/name/quantity/unit`; no money. Full contract, response codes, and a test command are in **`oms-backend/SQL-ACCOUNT-WEBHOOK.md`**; developer parity notes in **`oms-backend/INTEGRATION-NOTES.md`**.
 
-**On-prem relay** (SQL Account is embedded Firebird on the office PC — no TCP server). Three variants under `oms-backend/sql-account-bridge/`:
-- **`windows-firebird-auto/`** — the shipped solution. Polls the live `.FDB` mtime, runs FB5 `isql` → CSV → POSTs the webhook. Auto-detects the newest-mtime DB (client live DB = `ACC-0009.FDB`), excludes `L%` and `SO%`. Includes `Install.ps1`, `RUN-ME.bat`, **`SYNC-NOW.bat`** (force a sync), `TURN-OFF.bat`. Packaged for the client as `WawasanOMS-FactorySync.zip` (workspace root).
-- **`windows-no-node/`** — no-Node PowerShell CSV relay (interim).
-- **`bridge.mjs`** — Firebird-direct poll route (`fromFirebird`, stubbed) — the eventual "instant, no export" path; needs Node + `node-firebird` + the live `.FDB` table names on-prem.
+**On-prem relay** (SQL Account is embedded Firebird on the office PC — no TCP server). Three variants:
+- **`WawasanOMS-FactorySync/`** (repo root; was `sql-account-bridge/windows-firebird-auto/` until 2026-11-11) — the shipped solution. Polls the live `.FDB` mtime, runs FB5 `isql` → CSV → POSTs the webhook. Auto-detects the newest-mtime DB (client live DB = `ACC-0009.FDB`), excludes `L%` and `SO%`. Includes `Install.ps1`, `RUN-ME.bat`, **`SYNC-NOW.bat`** (force a sync), `TURN-OFF.bat`. Packaged for the client as `WawasanOMS-FactorySync.zip` (workspace root).
+- **`sql-account-bridge/windows-no-node/`** — no-Node PowerShell CSV relay (interim).
+- **`sql-account-bridge/bridge.mjs`** — Firebird-direct poll route (`fromFirebird`, stubbed) — the eventual "instant, no export" path; needs Node + `node-firebird` + the live `.FDB` table names on-prem.
 
 **Schema reference** (reverse-engineered): sales invoices = `SL_IV` + `SL_IVDTL` joined on `DOCKEY` (NOT `IV`/`IVDTL`; `AR_IV` is financial). `SL_IV` has `COMPANYNAME`, `DADDRESS1-4`, `CANCELLED`, `LASTMODIFIED`.
 
